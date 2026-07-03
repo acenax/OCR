@@ -1,0 +1,11 @@
+# TMC AI OCR PROGRAM - Python dependencies
+# Install:  python -m pip install -r requirements.txt
+PySide6>=6.6
+pandas>=2.0
+openpyxl>=3.1
+pdf2image>=1.16
+pytesseract>=0.3.10
+Pillow>=10.0
+opencv-python>=4.8
+rapidfuzz>=3.0
+numpy>=1.24

@@ -1,0 +1,15 @@
+13:33:07.652  === start ===
+13:33:07.862  PySide6 imported
+13:33:07.973  QApplication created
+13:33:09.940  app modules imported
+13:33:09.985  AppContext ready (customers=['CMT', 'NIPPON', 'Ogihara', 'TSGP นครนายก'])
+13:33:10.867  MainWindow built
+13:33:11.092  window shown -> entering event loop
+13:45:38.361  === start ===
+13:45:38.492  PySide6 imported
+13:45:38.533  QApplication created
+13:45:40.940  app modules imported
+13:45:40.948  AppContext ready (customers=['CMT'])
+13:45:41.944  MainWindow built
+13:45:42.078  window shown -> entering event loop
+14:02:02.452  event loop exited rc=0

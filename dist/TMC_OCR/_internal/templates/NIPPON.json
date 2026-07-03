@@ -1,0 +1,17 @@
+{
+  "customer": "NIPPON",
+  "mode": "anchors",
+  "number_mode": "fixed3",
+  "name_below": true,
+  "data_top_frac": 0.30,
+  "bottom_frac": 0.93,
+  "anchors": {
+    "item": 0.04,
+    "desc": 0.10,
+    "qty": 0.56,
+    "price": 0.70,
+    "amount": 0.84,
+    "date": 0.937
+  },
+  "note": "NIPPON PO: ไม่มีเส้นตาราง/หัวคอลัมน์, ชื่อสินค้าจริงอยู่บรรทัดถัดไป, ราคาทศนิยม 3 ตำแหน่ง(comma พันหลัก), หลายหน้า"
+}
