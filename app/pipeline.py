@@ -102,3 +102,20 @@ def relearn_layout(doc: PODocument):
         template.save(doc.customer, doc._anchors_frac, doc._header_bottom)  # type: ignore[attr-defined]
         return True
     return False
+
+# === PHASE2 MAPPING MEMORY PIPELINE PATCH ===
+_phase2_original_process_pdf = process_pdf
+
+
+def process_pdf(pdf_path: str, customer: str, cfg: Config, matcher: ProductMatcher | None) -> PODocument:
+    """Phase 2 wrapper: run original OCR pipeline, then apply remembered manual mappings."""
+    doc = _phase2_original_process_pdf(pdf_path, customer, cfg, matcher)
+    try:
+        from . import mapping_memory
+        mapping_memory.apply_to_document(customer, doc, override_fuzzy=True)
+    except Exception as exc:
+        try:
+            doc.warnings.append(f"อ่านประวัติการแก้ไขสินค้าไม่สำเร็จ: {exc}")
+        except Exception:
+            pass
+    return doc

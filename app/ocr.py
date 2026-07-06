@@ -78,12 +78,115 @@ def _parse_num(text, number_mode: str) -> float | None:
     return parse_decimal(text)
 
 
+# === PHASE2 POPPLER PATCH ===
+def _phase2_valid_poppler_bin(folder) -> str:
+    """Return a valid Poppler bin folder or empty string."""
+    try:
+        from pathlib import Path
+        p = Path(str(folder or "").strip().strip('"'))
+        if not p:
+            return ""
+        if p.is_file() and p.name.lower() in {"pdftoppm.exe", "pdftocairo.exe", "pdftoppm", "pdftocairo"}:
+            return str(p.parent)
+        candidates = [
+            p,
+            p / "bin",
+            p / "Library" / "bin",
+            p / "poppler" / "bin",
+            p / "poppler" / "Library" / "bin",
+        ]
+        for c in candidates:
+            if (c / "pdftoppm.exe").exists() or (c / "pdftocairo.exe").exists() or (c / "pdftoppm").exists() or (c / "pdftocairo").exists():
+                return str(c)
+    except Exception:
+        return ""
+    return ""
+
+
+def _phase2_resolve_poppler_path(pdf_path: str, configured: str = "") -> str:
+    """Find Poppler from settings, project folders, PDF root folders, common Windows paths, or PATH."""
+    from pathlib import Path
+    import os
+    import shutil
+
+    raw_candidates = []
+    if configured:
+        raw_candidates.append(configured)
+    env_poppler = os.environ.get("POPPLER_PATH") or os.environ.get("POPPLER_HOME")
+    if env_poppler:
+        raw_candidates.append(env_poppler)
+
+    here = Path(__file__).resolve()              # .../app/ocr.py
+    app_dir = here.parents[1]                    # .../TMC_OCR
+    raw_candidates.extend([
+        app_dir / "poppler" / "Library" / "bin",
+        app_dir / "poppler" / "bin",
+        app_dir / "poppler",
+        app_dir.parent / "poppler" / "Library" / "bin",
+        app_dir.parent / "poppler" / "bin",
+        app_dir.parent / "poppler",
+    ])
+
+    try:
+        p = Path(pdf_path).resolve()
+        for parent in list(p.parents)[:6]:
+            raw_candidates.extend([
+                parent / "poppler" / "Library" / "bin",
+                parent / "poppler" / "bin",
+                parent / "poppler",
+            ])
+    except Exception:
+        pass
+
+    raw_candidates.extend([
+        r"C:\poppler\Library\bin",
+        r"C:\poppler\bin",
+        r"C:\poppler",
+        r"C:\Program Files\poppler\Library\bin",
+        r"C:\Program Files\poppler\bin",
+        r"C:\Program Files\poppler",
+        r"C:\Program Files (x86)\poppler\Library\bin",
+        r"C:\Program Files (x86)\poppler\bin",
+    ])
+
+    seen = set()
+    for candidate in raw_candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        found = _phase2_valid_poppler_bin(candidate)
+        if found:
+            return found
+
+    # If pdftoppm is already in PATH, pdf2image can work without poppler_path.
+    if shutil.which("pdftoppm") or shutil.which("pdftocairo"):
+        return ""
+    return ""
+
+
 def render_pdf(path: str, dpi: int, poppler_path: str) -> list[Image.Image]:
     kwargs = {"dpi": dpi}
-    if poppler_path:
-        kwargs["poppler_path"] = poppler_path
-    return convert_from_path(path, **kwargs)
-
+    resolved_poppler = _phase2_resolve_poppler_path(path, poppler_path)
+    if resolved_poppler:
+        kwargs["poppler_path"] = resolved_poppler
+    try:
+        return convert_from_path(path, **kwargs)
+    except Exception as e:
+        msg = str(e)
+        if "Unable to get page count" in msg or "poppler" in msg.lower() or "pdftoppm" in msg.lower() or "pdfinfo" in msg.lower():
+            raise RuntimeError(
+                "แปลง PDF ไม่สำเร็จ เพราะระบบไม่พบ Poppler/pdftoppm.exe\n\n"
+                "วิธีแก้:\n"
+                "1) เปิดแท็บ 4) ตั้งค่า แล้วตั้งค่า Poppler ไปที่โฟลเดอร์ bin ที่มี pdftoppm.exe\n"
+                "   ตัวอย่าง: C:\\poppler\\Library\\bin\n"
+                "2) หรือวางโฟลเดอร์ poppler ไว้ข้างโฟลเดอร์ TMC_OCR เช่น ..\\poppler\\Library\\bin\n"
+                "3) ตรวจสอบได้ด้วยคำสั่ง: python check_poppler.py\n\n"
+                f"ไฟล์: {path}\n"
+                f"Poppler ที่ตั้งไว้: {poppler_path or '-'}\n"
+                f"รายละเอียดเดิม: {msg}"
+            ) from e
+        raise
 
 def preprocess(pil_img: Image.Image) -> np.ndarray:
     """For text OCR: grayscale + Otsu + light close to bridge dot-matrix gaps."""

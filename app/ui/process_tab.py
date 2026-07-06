@@ -64,8 +64,14 @@ class ProcessTab(QWidget):
 
         lv.addWidget(QLabel("ไฟล์ PO:"))
         self.lst = QListWidget()
+        self.lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.lst.currentItemChanged.connect(self._pdf_selected)
         lv.addWidget(self.lst, 1)
+
+        self.btn_delete_po = QPushButton("🗑 ลบไฟล์ PO ที่เลือก")
+        self.btn_delete_po.setToolTip("ลบไฟล์ PDF ที่เลือกออกจากโฟลเดอร์ PO ของลูกค้า")
+        self.btn_delete_po.clicked.connect(self.delete_selected_po_files)
+        lv.addWidget(self.btn_delete_po)
 
         self.btn_ocr = QPushButton("▶ อ่านเอกสาร (OCR)")
         self.btn_ocr.clicked.connect(self.run_ocr)
@@ -218,6 +224,182 @@ class ProcessTab(QWidget):
             self._load_doc(self.docs[path])
         else:
             self._clear_table()
+
+
+    def delete_selected_po_files(self):
+
+        """Delete selected PO PDF files from disk and remove them from the list."""
+
+        if self.worker is not None and hasattr(self.worker, "isRunning") and self.worker.isRunning():
+
+            QMessageBox.warning(self, "ลบไฟล์ PO", "ระบบกำลังอ่านเอกสาร OCR อยู่ กรุณารอให้เสร็จก่อน")
+
+            return
+
+
+        selected = self.lst.selectedItems()
+
+        if not selected and self.lst.currentItem():
+
+            selected = [self.lst.currentItem()]
+
+
+        if not selected:
+
+            QMessageBox.information(self, "ลบไฟล์ PO", "กรุณาเลือกไฟล์ PO ที่ต้องการลบก่อน")
+
+            return
+
+
+        items_to_delete = []
+
+        seen = set()
+
+        for item in selected:
+
+            raw_path = item.data(Qt.UserRole)
+
+            if not raw_path:
+
+                continue
+
+            path = Path(str(raw_path))
+
+            key = str(path.resolve()) if path.exists() else str(path)
+
+            if key not in seen:
+
+                seen.add(key)
+
+                items_to_delete.append((item, path, str(raw_path)))
+
+
+        if not items_to_delete:
+
+            QMessageBox.information(self, "ลบไฟล์ PO", "ไม่พบไฟล์ PO ที่เลือก")
+
+            return
+
+
+        names = [path.name for _item, path, _raw in items_to_delete]
+
+        preview = "\n".join(names[:10])
+
+        if len(names) > 10:
+
+            preview += f"\n... อีก {len(names) - 10} ไฟล์"
+
+
+        answer = QMessageBox.question(
+
+            self,
+
+            "ยืนยันลบไฟล์ PO",
+
+            f"ต้องการลบไฟล์ PO ที่เลือก {len(items_to_delete)} ไฟล์ออกจากโฟลเดอร์ลูกค้าหรือไม่?\n\n"
+
+            f"{preview}\n\n"
+
+            "หมายเหตุ: ระบบจะลบไฟล์ PDF จริงออกจากเครื่อง แต่ไม่ลบไฟล์ Excel ที่เคย Export แล้ว",
+
+        )
+
+        if answer != QMessageBox.Yes:
+
+            return
+
+
+        deleted_paths = set()
+
+        failed = []
+
+        for _item, path, raw_path in items_to_delete:
+
+            try:
+
+                if path.exists():
+
+                    path.unlink()
+
+                deleted_paths.add(str(path.resolve()) if path.exists() else str(path))
+
+                deleted_paths.add(raw_path)
+
+                self.docs.pop(raw_path, None)
+
+                self.docs.pop(str(path), None)
+
+            except Exception as exc:
+
+                failed.append(f"{path.name}: {exc}")
+
+
+        # Remove successfully deleted items from the QListWidget.
+
+        for row in range(self.lst.count() - 1, -1, -1):
+
+            item = self.lst.item(row)
+
+            raw_path = item.data(Qt.UserRole)
+
+            if not raw_path:
+
+                continue
+
+            path = Path(str(raw_path))
+
+            keys = {str(raw_path), str(path)}
+
+            try:
+
+                keys.add(str(path.resolve()))
+
+            except Exception:
+
+                pass
+
+            if keys & deleted_paths:
+
+                self.lst.takeItem(row)
+
+
+        if self.current_path:
+
+            cur_path = Path(str(self.current_path))
+
+            cur_keys = {str(self.current_path), str(cur_path)}
+
+            try:
+
+                cur_keys.add(str(cur_path.resolve()))
+
+            except Exception:
+
+                pass
+
+            if cur_keys & deleted_paths:
+
+                self.current_path = ""
+
+                self._clear_table()
+
+                if self.lst.count():
+
+                    self.lst.setCurrentRow(0)
+
+
+        msg = f"ลบไฟล์ PO สำเร็จ {len(items_to_delete) - len(failed)} ไฟล์"
+
+        if failed:
+
+            msg += "\n\nลบไม่สำเร็จ:\n" + "\n".join(failed[:10])
+
+            QMessageBox.warning(self, "ลบไฟล์ PO", msg)
+
+        else:
+
+            QMessageBox.information(self, "ลบไฟล์ PO", msg)
+
 
     # ---------------- OCR ----------------
     def run_ocr(self):
@@ -515,3 +697,367 @@ class ProcessTab(QWidget):
             f"และเก็บสรุปรายเดือน {saved} ใบเรียบร้อย")
         if self.on_saved:
             self.on_saved()
+# === PHASE1 UX PATCH: drag-drop-auto-validate ===
+# This block is appended by apply_phase1_patch.py. It keeps the original UI
+# mostly intact, then adds Drag & Drop, auto OCR, and export validation.
+try:
+    from .. import validator as _phase1_validator
+    from ..models import POLine as _Phase1POLine
+
+    def _phase1_pdf_paths_from_event(event):
+        out = []
+        try:
+            urls = event.mimeData().urls()
+        except Exception:
+            return out
+        for url in urls:
+            path = url.toLocalFile()
+            if path and Path(path).is_file() and Path(path).suffix.lower() == ".pdf":
+                out.append(path)
+        return out
+
+    def _phase1_dragEnterEvent(self, event):
+        if _phase1_pdf_paths_from_event(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _phase1_dropEvent(self, event):
+        paths = _phase1_pdf_paths_from_event(event)
+        if not paths:
+            event.ignore()
+            return
+        cust = self.cmb_customer.currentText()
+        if cust:
+            try:
+                copied, skipped = customers.import_po_files(self.ctx.cfg, cust, paths)
+            except Exception as e:
+                QMessageBox.warning(self, "ลากไฟล์ PO", str(e))
+                return
+            folder = Path(self.ctx.cfg["root_folder"]) / cust / self.ctx.cfg["po_subfolder"]
+            self._load_folder(str(folder))
+            msg = f"นำเข้า {len(copied)} ไฟล์แล้ว"
+            if skipped:
+                msg += f"\nข้าม {len(skipped)} ไฟล์: {', '.join(skipped[:5])}"
+            self.setWindowTitle_safe(msg)
+            if copied:
+                self.run_ocr()
+        else:
+            self.lst.clear()
+            self.docs.clear()
+            for path in paths:
+                self._add_pdf_item(path)
+            self.run_ocr()
+        event.acceptProposedAction()
+
+    def _phase1_load_folder(self, folder: str):
+        self.lst.clear()
+        self.docs.clear()
+        base = Path(folder)
+        if not base.exists():
+            return
+        for f in sorted([p for p in base.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"]):
+            self._add_pdf_item(str(f))
+
+    def _phase1_import_po(self):
+        cust = self.cmb_customer.currentText()
+        if not cust:
+            QMessageBox.warning(self, "นำเข้า PO", "กรุณาเลือกลูกค้าก่อน")
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "เลือกไฟล์ PO (PDF) ที่จะนำเข้าโฟลเดอร์ลูกค้า",
+            "",
+            "PDF (*.pdf *.PDF)",
+        )
+        if not files:
+            return
+        try:
+            copied, skipped = customers.import_po_files(self.ctx.cfg, cust, files)
+        except customers.RegisterError as e:
+            QMessageBox.warning(self, "นำเข้า PO", str(e))
+            return
+        folder = Path(self.ctx.cfg["root_folder"]) / cust / self.ctx.cfg["po_subfolder"]
+        self._load_folder(str(folder))
+        msg = f"นำเข้า {len(copied)} ไฟล์เข้าโฟลเดอร์ '{cust}' แล้ว"
+        if skipped:
+            msg += f"\nข้าม {len(skipped)} ไฟล์: {', '.join(skipped[:5])}"
+        QMessageBox.information(self, "นำเข้า PO", msg)
+        if copied:
+            self.run_ocr()
+
+    def _phase1_choose_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "เลือกไฟล์ PDF", "", "PDF (*.pdf *.PDF)")
+        if files:
+            self.lst.clear()
+            self.docs.clear()
+            for f in files:
+                if Path(f).suffix.lower() == ".pdf":
+                    self._add_pdf_item(f)
+            self.run_ocr()
+
+    def _phase1_doc_threshold(self) -> float:
+        try:
+            return float(self.ctx.cfg.get("fuzzy_strong", 90))
+        except Exception:
+            return 90.0
+
+    def _phase1_validate_doc(self, doc):
+        return _phase1_validator.validate_document(
+            doc,
+            fuzzy_review_threshold=_phase1_doc_threshold(self),
+            require_stock_group=True,
+        )
+
+    def _phase1_show_validation(self, doc):
+        issues = _phase1_validate_doc(self, doc)
+        critical, review = _phase1_validator.split_issues(issues)
+        if critical:
+            self.lbl_warn.setStyleSheet("color:#b02a37;")
+            self.lbl_warn.setText("❌ ต้องแก้ก่อน Export\n" + _phase1_validator.summarize_issues(critical))
+        elif review:
+            self.lbl_warn.setStyleSheet("color:#b36b00;")
+            self.lbl_warn.setText("⚠ ควรตรวจทานก่อน Export\n" + _phase1_validator.summarize_issues(review))
+        elif getattr(doc, "warnings", None):
+            self.lbl_warn.setStyleSheet("color:#b36b00;")
+            self.lbl_warn.setText("⚠ " + " | ".join(doc.warnings))
+        else:
+            self.lbl_warn.setStyleSheet("color:#1a7f37;")
+            self.lbl_warn.setText("✅ ผ่านการตรวจสอบ พร้อม Export")
+        return critical, review
+
+    _phase1_original_init = ProcessTab.__init__
+    def _phase1_init(self, *args, **kwargs):
+        _phase1_original_init(self, *args, **kwargs)
+        self.setAcceptDrops(True)
+        try:
+            self.lst.setAcceptDrops(False)
+            self.setToolTip("สามารถลากไฟล์ PDF มาวางในหน้านี้ได้ ระบบจะนำเข้าและ OCR ให้อัตโนมัติ")
+        except Exception:
+            pass
+
+    _phase1_original_append_row = ProcessTab._append_row
+    def _phase1_append_row(self, line):
+        _phase1_original_append_row(self, line)
+        r = self.table.rowCount() - 1
+        issues = _phase1_validator.validate_line(
+            line,
+            r + 1,
+            fuzzy_review_threshold=_phase1_doc_threshold(self),
+            require_stock_group=True,
+        )
+        critical, review = _phase1_validator.split_issues(issues)
+        st = self.table.item(r, C_STATUS)
+        if st is not None:
+            if critical:
+                st.setText("ต้องแก้: " + ", ".join(i.message for i in critical[:2]))
+                st.setForeground(QBrush(QColor("#b02a37")))
+            elif review:
+                st.setText("ตรวจทาน: " + ", ".join(i.message for i in review[:2]))
+                st.setForeground(QBrush(QColor("#b36b00")))
+            else:
+                st.setText("ผ่าน")
+                st.setForeground(QBrush(QColor("#1a7f37")))
+
+    _phase1_original_on_doc = ProcessTab._on_doc
+    def _phase1_on_doc(self, doc):
+        self.docs[doc.source_pdf] = doc
+        issues = _phase1_validate_doc(self, doc)
+        critical, review = _phase1_validator.split_issues(issues)
+        for i in range(self.lst.count()):
+            it = self.lst.item(i)
+            if it.data(Qt.UserRole) == doc.source_pdf:
+                if critical:
+                    mark = "❌"
+                    note = f"ต้องแก้ {len(critical)} จุด"
+                elif review or doc.warnings:
+                    mark = "⚠️"
+                    note = f"ตรวจทาน {len(review) + len(doc.warnings)} จุด"
+                else:
+                    mark = "✅"
+                    note = "พร้อม Export"
+                it.setText(f"{mark} {Path(doc.source_pdf).name} ({doc.item_count} รายการ / {note})")
+        if doc.source_pdf == self.current_path or not self.current_path:
+            self.current_path = doc.source_pdf
+            self._load_doc(doc)
+
+    _phase1_original_load_doc = ProcessTab._load_doc
+    def _phase1_load_doc(self, doc):
+        _phase1_original_load_doc(self, doc)
+        _phase1_show_validation(self, doc)
+
+    def _phase1_capture_table(self):
+        """Read table back into current doc while preserving match status/score/amount."""
+        if not self.current_path or self.current_path not in self.docs:
+            return
+        doc = self.docs[self.current_path]
+        doc.po_no = self.ed_po.text().strip()
+        doc.po_date = self.ed_date.text().strip()
+        doc.total = self._num(self.ed_total.text())
+        doc.vat = self._num(self.ed_vat.text())
+        doc.grand_total = self._num(self.ed_grand.text())
+        old_lines = list(getattr(doc, "lines", []) or [])
+        lines = []
+        for r in range(self.table.rowCount()):
+            old = old_lines[r] if r < len(old_lines) else _Phase1POLine()
+            tmc_w = self.table.cellWidget(r, C_TMC)
+            stock_w = self.table.cellWidget(r, C_STOCK)
+            new_tmc = tmc_w.value() if tmc_w else ""
+            line = _Phase1POLine(
+                item_no=self._cell(r, C_ITEM),
+                product_code_raw=self._cell(r, C_CODE),
+                description_raw=self._cell(r, C_DESC),
+                tmc_code=new_tmc,
+                matched_name=self._cell(r, C_MATCH),
+                stock_group_code=stock_w.value() if stock_w else "",
+                qty=self._num(self._cell(r, C_QTY)),
+                price=self._num(self._cell(r, C_PRICE)),
+                amount=getattr(old, "amount", 0.0),
+                match_score=getattr(old, "match_score", 0.0),
+                match_status=getattr(old, "match_status", "no_match"),
+            )
+            if new_tmc and new_tmc != getattr(old, "tmc_code", ""):
+                line.match_status = "manual"
+                line.match_score = 100.0
+            lines.append(line)
+        doc.lines = lines
+        _phase1_show_validation(self, doc)
+
+    def _phase1_confirm_export(self, docs):
+        all_critical = []
+        all_review = []
+        for doc in docs:
+            issues = _phase1_validate_doc(self, doc)
+            critical, review = _phase1_validator.split_issues(issues)
+            all_critical.extend((doc, issue) for issue in critical)
+            all_review.extend((doc, issue) for issue in review)
+        if all_critical:
+            lines = []
+            for doc, issue in all_critical[:10]:
+                lines.append(f"{Path(doc.source_pdf).name}: {issue.as_text()}")
+            if len(all_critical) > 10:
+                lines.append(f"...และอีก {len(all_critical) - 10} จุด")
+            QMessageBox.warning(self, "ยัง Export ไม่ได้", "กรุณาแก้ข้อมูลสำคัญก่อน Export:\n\n" + "\n".join(lines))
+            return False
+        if all_review:
+            lines = []
+            for doc, issue in all_review[:10]:
+                lines.append(f"{Path(doc.source_pdf).name}: {issue.as_text()}")
+            if len(all_review) > 10:
+                lines.append(f"...และอีก {len(all_review) - 10} จุด")
+            r = QMessageBox.question(
+                self,
+                "มีรายการที่ควรตรวจทาน",
+                "พบข้อมูลที่ควรตรวจทานก่อน Export:\n\n" + "\n".join(lines) + "\n\nต้องการ Export ต่อหรือไม่?",
+            )
+            return r == QMessageBox.Yes
+        return True
+
+    _phase1_original_save_current = ProcessTab.save_current
+    def _phase1_save_current(self):
+        self._capture_table()
+        if not self.current_path or self.current_path not in self.docs:
+            QMessageBox.information(self, "บันทึก", "ยังไม่มีเอกสารให้บันทึก")
+            return
+        doc = self.docs[self.current_path]
+        if not _phase1_confirm_export(self, [doc]):
+            return
+        _phase1_original_save_current(self)
+
+    _phase1_original_save_combined = ProcessTab.save_combined
+    def _phase1_save_combined(self):
+        self._capture_table()
+        ordered = []
+        for i in range(self.lst.count()):
+            p = self.lst.item(i).data(Qt.UserRole)
+            if p in self.docs:
+                ordered.append(self.docs[p])
+        if ordered and not _phase1_confirm_export(self, ordered):
+            return
+        _phase1_original_save_combined(self)
+
+    ProcessTab.__init__ = _phase1_init
+    ProcessTab.dragEnterEvent = _phase1_dragEnterEvent
+    ProcessTab.dropEvent = _phase1_dropEvent
+    ProcessTab._load_folder = _phase1_load_folder
+    ProcessTab.import_po = _phase1_import_po
+    ProcessTab.choose_files = _phase1_choose_files
+    ProcessTab._append_row = _phase1_append_row
+    ProcessTab._on_doc = _phase1_on_doc
+    ProcessTab._load_doc = _phase1_load_doc
+    ProcessTab._capture_table = _phase1_capture_table
+    ProcessTab.save_current = _phase1_save_current
+    ProcessTab.save_combined = _phase1_save_combined
+except Exception as _phase1_patch_error:
+    # Keep the app startable even if this patch block has an unexpected issue.
+    print("PHASE1 UX PATCH disabled:", _phase1_patch_error)
+# === END PHASE1 UX PATCH ===
+
+# === PHASE2 MAPPING MEMORY UI PATCH ===
+try:
+    from .. import mapping_memory as _phase2_mapping_memory
+
+    _phase2_original_status_color = ProcessTab._status_color
+
+    def _phase2_status_color(status: str):
+        status = str(status or "").lower().strip()
+        if status == "remembered":
+            return QColor("#6f42c1")
+        if status == "manual":
+            return QColor("#0a58ca")
+        return _phase2_original_status_color(status)
+
+    ProcessTab._status_color = staticmethod(_phase2_status_color)
+
+    _phase2_original_on_tmc_changed = ProcessTab._on_tmc_changed
+
+    def _phase2_on_tmc_changed(self, text):
+        _phase2_original_on_tmc_changed(self, text)
+        sender = self.sender()
+        if sender is None:
+            return
+        for r in range(self.table.rowCount()):
+            if self.table.cellWidget(r, C_TMC) is sender:
+                st = self.table.item(r, C_STATUS)
+                if st is None:
+                    st = QTableWidgetItem()
+                    st.setFlags(st.flags() & ~Qt.ItemIsEditable)
+                    self.table.setItem(r, C_STATUS, st)
+                # If the user changes/selects a tmc_code, treat it as a manual correction.
+                value = sender.value() if hasattr(sender, "value") else str(text or "")
+                if str(value or "").strip():
+                    st.setText("manual 100")
+                    st.setForeground(QBrush(QColor("#0a58ca")))
+                return
+
+    ProcessTab._on_tmc_changed = _phase2_on_tmc_changed
+
+    _phase2_original_capture_table = ProcessTab._capture_table
+
+    def _phase2_capture_table(self):
+        _phase2_original_capture_table(self)
+        if not self.current_path or self.current_path not in self.docs:
+            return
+        doc = self.docs[self.current_path]
+        # Restore match_status/match_score from the visible status column because
+        # the original capture_table recreates POLine objects without those fields.
+        for r, line in enumerate(doc.lines):
+            st_text = self._cell(r, C_STATUS) if r < self.table.rowCount() else ""
+            parts = st_text.split()
+            if parts:
+                line.match_status = parts[0].strip()
+            if len(parts) >= 2:
+                try:
+                    line.match_score = float(parts[1])
+                except Exception:
+                    pass
+        # Save local memory so the next OCR run can fill repeated corrections automatically.
+        try:
+            _phase2_mapping_memory.remember_document(doc.customer or self.cmb_customer.currentText(), doc)
+        except Exception:
+            pass
+
+    ProcessTab._capture_table = _phase2_capture_table
+
+except Exception:
+    pass

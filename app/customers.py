@@ -116,3 +116,58 @@ def customer_status(cfg: Config, customer: str) -> dict:
         "n_po": n_po,
         "has_template": template.exists(customer),
     }
+# === PHASE1 CUSTOMER PATCH: safe pdf import ===
+# This block is appended by apply_phase1_patch.py. It overrides only two helper
+# functions so importing/counting PO files is case-insensitive and PDF-only.
+def import_po_files(cfg: Config, customer: str, src_paths: list[str]) -> tuple[list[str], list[str]]:
+    """Copy PO PDFs into the customer's PO folder.
+
+    Returns (copied_paths, skipped_names). Existing files and non-PDF files are skipped.
+    """
+    if not customer:
+        raise RegisterError("ยังไม่ได้เลือกลูกค้า")
+    dest_dir = Path(cfg["root_folder"]) / customer / cfg["po_subfolder"]
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    copied, skipped = [], []
+    for s in src_paths:
+        src = Path(s)
+        if not src.exists() or not src.is_file():
+            skipped.append(f"{src.name} (ไม่พบไฟล์)")
+            continue
+        if src.suffix.lower() != ".pdf":
+            skipped.append(f"{src.name} (ไม่ใช่ PDF)")
+            continue
+        dest = dest_dir / src.name
+        if dest.exists():
+            skipped.append(f"{src.name} (มีอยู่แล้ว)")
+            continue
+        shutil.copy2(src, dest)
+        copied.append(str(dest))
+    return copied, skipped
+
+
+def customer_status(cfg: Config, customer: str) -> dict:
+    """Summary shown in the registration tab."""
+    from .pipeline import product_file_for
+    pf = product_file_for(cfg["root_folder"], customer, cfg["product_subfolder"])
+    n_products = 0
+    if pf:
+        try:
+            df = pd.read_excel(pf)
+            tmc_col = next((c for c in df.columns if "tmc" in str(c).lower()), None)
+            n_products = int(df[tmc_col].notna().sum()) if tmc_col else 0
+        except Exception:
+            n_products = 0
+    po_dir = Path(cfg["root_folder"]) / customer / cfg["po_subfolder"]
+    n_po = 0
+    if po_dir.exists():
+        n_po = len([p for p in po_dir.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"])
+    return {
+        "customer": customer,
+        "has_product_file": bool(pf),
+        "product_file": pf,
+        "n_products": n_products,
+        "n_po": n_po,
+        "has_template": template.exists(customer),
+    }
+# === END PHASE1 CUSTOMER PATCH ===

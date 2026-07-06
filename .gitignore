@@ -1,0 +1,33 @@
+# Added by OCR phase 1 patch
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# Local runtime/config/data
+settings.json
+*.db
+*.sqlite
+*.sqlite3
+*.log
+startup_trace.log
+
+# Office temporary files
+~$*.xlsx
+~$*.xls
+~$*.docx
+
+# OCR working/output folders (keep real customer data out of git)
+TMC INVOICE INPUT/
+**/PO FROM CUSTOMER/
+**/PRODUCT DETAIL/Product Details.xlsx
+**/INVOICE FILE/
