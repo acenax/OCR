@@ -1,5 +1,5 @@
 """Write the invoice Excel in the required TMC format:
-columns = tmc_code | stock_group_code | qty | price
+columns = tmc_code | qty | price
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from openpyxl import Workbook
 
 from .models import PODocument
 
-COLUMNS = ["tmc_code", "stock_group_code", "qty", "price"]
+COLUMNS = ["tmc_code", "qty", "price"]
 
 
 def default_filename(po_no: str) -> str:
@@ -47,7 +47,7 @@ def export_combined(docs: list[PODocument], out_path: str) -> str:
     ws.append(COLUMNS)
     for doc in docs:
         for l in doc.lines:
-            ws.append([l.tmc_code, l.stock_group_code, l.qty, l.price])
+            ws.append([l.tmc_code, l.qty, l.price])
     # ชีตสรุปแยกรายใบ (ลูกค้า/เลข PO/จำนวน/ยอด) เพื่อการตรวจสอบย้อนหลัง
     s = wb.create_sheet("Summary")
     s.append(["customer", "po_no", "po_date", "item_count", "total", "vat", "grand_total"])
@@ -65,7 +65,7 @@ def export_invoice(doc: PODocument, out_path: str) -> str:
     ws.title = "Invoice"
     ws.append(COLUMNS)
     for l in doc.lines:
-        ws.append([l.tmc_code, l.stock_group_code, l.qty, l.price])
+        ws.append([l.tmc_code, l.qty, l.price])
     # a small summary sheet mirrors what the program stores per month
     s = wb.create_sheet("Summary")
     s.append(["customer", "po_no", "po_date", "item_count", "total", "vat", "grand_total"])
@@ -74,3 +74,19 @@ def export_invoice(doc: PODocument, out_path: str) -> str:
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
     return out_path
+
+
+# PHASE12_EXPORT_NORMALIZE
+try:
+    from .arabic_digits import normalize_obj_digits as _phase12_norm_doc
+    _phase12_old_export_invoice = export_invoice
+    _phase12_old_export_combined = export_combined
+    def export_invoice(doc, out_path):
+        _phase12_norm_doc(doc)
+        return _phase12_old_export_invoice(doc, out_path)
+    def export_combined(docs, out_path):
+        for _d in list(docs or []):
+            _phase12_norm_doc(_d)
+        return _phase12_old_export_combined(docs, out_path)
+except Exception:
+    pass

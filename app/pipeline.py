@@ -119,3 +119,87 @@ def process_pdf(pdf_path: str, customer: str, cfg: Config, matcher: ProductMatch
         except Exception:
             pass
     return doc
+
+# === PHASE5 OCR CACHE PATCH ===
+try:
+    from . import ocr_cache as _phase5_ocr_cache
+    if not getattr(process_pdf, "_phase5_cache_wrapped", False):
+        _phase5_original_process_pdf = process_pdf
+        def _phase5_process_pdf_cached(pdf_path, customer, cfg, matcher):
+            try:
+                cached = _phase5_ocr_cache.load_cached_document(pdf_path, customer, cfg, matcher)
+                if cached is not None:
+                    cached.source_pdf = str(pdf_path)
+                    cached.customer = customer
+                    setattr(cached, "cache_hit", True)
+                    return cached
+            except Exception:
+                pass
+            doc = _phase5_original_process_pdf(pdf_path, customer, cfg, matcher)
+            try:
+                _phase5_ocr_cache.save_document(pdf_path, customer, cfg, matcher, doc)
+                setattr(doc, "cache_hit", False)
+            except Exception:
+                pass
+            return doc
+        _phase5_process_pdf_cached._phase5_cache_wrapped = True
+        process_pdf = _phase5_process_pdf_cached
+except Exception as _phase5_cache_error:
+    print("PHASE5 OCR CACHE PATCH disabled:", _phase5_cache_error)
+# === END PHASE5 OCR CACHE PATCH ===
+
+# === PHASE9 AMOUNT/TOTAL REPAIR PIPELINE PATCH ===
+_phase9_original_process_pdf = process_pdf
+
+def process_pdf(pdf_path: str, customer: str, cfg: Config, matcher: ProductMatcher | None) -> PODocument:
+    doc = _phase9_original_process_pdf(pdf_path, customer, cfg, matcher)
+    try:
+        from . import amount_repair
+        amount_repair.repair_document(doc, update_header=True)
+    except Exception as exc:
+        try:
+            doc.warnings.append(f"ซ่อมยอดเงิน/ราคาอัตโนมัติไม่สำเร็จ: {exc}")
+        except Exception:
+            pass
+    return doc
+
+# === PHASE10 OCR STABILITY NORMALIZER ===
+try:
+    from app.ocr_stability import normalize_po_document as _phase10_normalize_po_document
+except Exception:
+    try:
+        from .ocr_stability import normalize_po_document as _phase10_normalize_po_document
+    except Exception:
+        _phase10_normalize_po_document = None
+
+try:
+    if _phase10_normalize_po_document is not None and '_phase10_orig_process_pdf' not in globals():
+        _phase10_orig_process_pdf = process_pdf
+        def process_pdf(*args, **kwargs):
+            doc = _phase10_orig_process_pdf(*args, **kwargs)
+            return _phase10_normalize_po_document(doc)
+except Exception as _phase10_exc:
+    print('Phase10 pipeline normalizer skipped:', _phase10_exc)
+# === END PHASE10 OCR STABILITY NORMALIZER ===
+
+# === PHASE12 CLEANUP DELETE ARABIC PATCH ===
+try:
+    from .arabic_digits import normalize_obj_digits as _phase12_norm_doc
+    # Patch likely public functions that return PODocument.
+    for _name, _fn in list(globals().items()):
+        if callable(_fn) and _name.lower() in {"process_pdf", "process_po", "read_pdf", "parse_pdf", "ocr_pdf", "run_pipeline"}:
+            def _make_wrapper(fn):
+                def _wrapped(*args, **kwargs):
+                    res = fn(*args, **kwargs)
+                    try:
+                        if isinstance(res, list):
+                            for x in res: _phase12_norm_doc(x)
+                        else:
+                            _phase12_norm_doc(res)
+                    except Exception:
+                        pass
+                    return res
+                return _wrapped
+            globals()[_name] = _make_wrapper(_fn)
+except Exception:
+    pass

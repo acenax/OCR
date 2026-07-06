@@ -39,7 +39,7 @@ def validate_line(
     row_no: int,
     *,
     fuzzy_review_threshold: float = 90.0,
-    require_stock_group: bool = True,
+    require_stock_group: bool = False,
 ) -> list[ValidationIssue]:
     """Return issues found in a single PO line.
 
@@ -51,8 +51,8 @@ def validate_line(
     if _is_blank(line.tmc_code):
         issues.append(ValidationIssue("critical", row_no, "tmc_code", "ยังไม่มี tmc_code"))
 
-    if require_stock_group and _is_blank(line.stock_group_code):
-        issues.append(ValidationIssue("critical", row_no, "stock_group_code", "ยังไม่มี stock_group_code"))
+    if False and require_stock_group and _is_blank(line.stock_group_code):
+        issues.append(ValidationIssue("critical", row_no, "stock_group_code", "stock_group_code ถูกปิดใช้งานแล้ว"))
 
     if _money(line.qty) <= 0:
         issues.append(ValidationIssue("critical", row_no, "qty", "จำนวนเป็น 0 หรือว่าง"))
@@ -96,7 +96,7 @@ def validate_document(
     doc: PODocument,
     *,
     fuzzy_review_threshold: float = 90.0,
-    require_stock_group: bool = True,
+    require_stock_group: bool = False,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
 
@@ -169,3 +169,39 @@ def summarize_issues(issues: Iterable[ValidationIssue], *, limit: int = 8) -> st
     if len(items) > limit:
         lines.append(f"...และอีก {len(items) - limit} รายการ")
     return "\n".join(lines)
+
+# === PHASE9 AMOUNT/TOTAL REPAIR VALIDATOR PATCH ===
+_phase9_original_validate_document = validate_document
+_phase9_original_validate_line = validate_line
+
+def validate_line(line: POLine, row_no: int, *, fuzzy_review_threshold: float = 90.0, require_stock_group: bool = False) -> list[ValidationIssue]:
+    try:
+        from . import amount_repair
+        amount_repair.repair_line(line)
+    except Exception:
+        pass
+    issues = _phase9_original_validate_line(
+        line,
+        row_no,
+        fuzzy_review_threshold=fuzzy_review_threshold,
+        require_stock_group=require_stock_group,
+    )
+    for issue in issues:
+        if issue.field == "stock_group_code" and "stock_group_code" in issue.message:
+            issue.message = "ยังไม่ได้เลือก stock_group_code (รหัสกลุ่มคลังสำหรับไฟล์ Export)"
+        elif issue.field == "price" and "ราคาเป็น 0" in issue.message:
+            issue.message = "ราคาเป็น 0 หรืออ่านไม่ได้ และยังไม่สามารถซ่อมจากยอดเงิน OCR ได้"
+    return issues
+
+
+def validate_document(doc: PODocument, *, fuzzy_review_threshold: float = 90.0, require_stock_group: bool = False) -> list[ValidationIssue]:
+    try:
+        from . import amount_repair
+        amount_repair.repair_document(doc, update_header=True)
+    except Exception:
+        pass
+    return _phase9_original_validate_document(
+        doc,
+        fuzzy_review_threshold=fuzzy_review_threshold,
+        require_stock_group=require_stock_group,
+    )

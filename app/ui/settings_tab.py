@@ -93,3 +93,71 @@ class SettingsTab(QWidget):
             self.lbl.setText("✔ " + (out.stdout or out.stderr).splitlines()[0])
         except Exception as e:
             QMessageBox.critical(self, "Tesseract", f"เรียกใช้ไม่สำเร็จ:\n{e}")
+
+
+# === PHASE7 AUTO PATH PATCH ===
+# Adds an auto-detect button to Settings without disturbing the original UI.
+try:
+    from ..auto_paths import find_tesseract as _phase7_find_tesseract, find_poppler as _phase7_find_poppler, diagnostic as _phase7_diagnostic
+    _phase7_original_build = SettingsTab._build
+
+    def _phase7_auto_detect_paths(self):
+        from pathlib import Path
+        starts = []
+        try:
+            if self.ed_root.text().strip():
+                starts.extend([self.ed_root.text().strip(), str(Path(self.ed_root.text().strip()).parent)])
+        except Exception:
+            pass
+        tess = _phase7_find_tesseract(self.ed_tess.text().strip(), start_dirs=starts)
+        popp = _phase7_find_poppler(self.ed_popp.text().strip(), start_dirs=starts)
+        if tess:
+            self.ed_tess.setText(tess)
+        if popp:
+            self.ed_popp.setText(popp)
+        c = self.ctx.cfg
+        if tess:
+            c.set("tesseract_path", tess)
+        if popp or not self.ed_popp.text().strip():
+            c.set("poppler_path", popp)
+        c.save()
+        try:
+            self.ctx.apply_tesseract()
+        except Exception:
+            pass
+        self.lbl.setText(
+            "✔ ค้นหา Path อัตโนมัติแล้ว\n"
+            f"Tesseract: {tess or 'ไม่พบ'}\n"
+            f"Poppler: {popp or 'พบใน PATH หรือไม่พบ'}"
+        )
+        if self.on_changed:
+            self.on_changed()
+
+    def _phase7_show_auto_diagnostic(self):
+        try:
+            msg = _phase7_diagnostic(self.ed_tess.text().strip(), self.ed_popp.text().strip(), [self.ed_root.text().strip()])
+            QMessageBox.information(self, "Auto Path Diagnostic", msg)
+        except Exception as e:
+            QMessageBox.warning(self, "Auto Path Diagnostic", str(e))
+
+    def _phase7_build(self):
+        _phase7_original_build(self)
+        try:
+            row = QHBoxLayout()
+            b_auto = QPushButton("🔎 ค้นหา Path อัตโนมัติ")
+            b_auto.clicked.connect(self.auto_detect_paths)
+            b_diag = QPushButton("ตรวจ Path")
+            b_diag.clicked.connect(self.show_auto_diagnostic)
+            row.addWidget(b_auto)
+            row.addWidget(b_diag)
+            row.addStretch()
+            self.layout().insertLayout(max(0, self.layout().count() - 2), row)
+        except Exception:
+            pass
+
+    SettingsTab.auto_detect_paths = _phase7_auto_detect_paths
+    SettingsTab.show_auto_diagnostic = _phase7_show_auto_diagnostic
+    SettingsTab._build = _phase7_build
+except Exception:
+    pass
+# === END PHASE7 AUTO PATH PATCH ===

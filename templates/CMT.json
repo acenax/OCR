@@ -1,12 +1,80 @@
 {
   "customer": "CMT",
-  "anchors": {
-    "item": 0.10120967741935484,
-    "code": 0.20241935483870968,
-    "desc": 0.4661290322580645,
-    "qty": 0.707258064516129,
-    "price": 0.8092741935483871,
-    "amount": 0.93125
+  "mode": "anchors",
+  "number_mode": "fixed2",
+  "name_below": false,
+  "data_top_frac": 0.38097,
+  "bottom_frac": 0.56081,
+  "columns": {
+    "item": [
+      0.07817,
+      0.10959
+    ],
+    "code": [
+      0.13718,
+      0.21228
+    ],
+    "desc": [
+      0.27742,
+      0.53262
+    ],
+    "qty": [
+      0.67746,
+      0.74797
+    ],
+    "price": [
+      0.79088,
+      0.85526
+    ],
+    "amount": [
+      0.92239,
+      0.99202
+    ]
   },
-  "header_bottom": 0.37790082644628104
+  "boxes": {
+    "item": [
+      0.07817,
+      0.38397,
+      0.10959,
+      0.55131
+    ],
+    "code": [
+      0.13718,
+      0.38397,
+      0.21228,
+      0.55511
+    ],
+    "desc": [
+      0.27742,
+      0.38397,
+      0.53262,
+      0.54861
+    ],
+    "qty": [
+      0.67746,
+      0.38884,
+      0.74797,
+      0.55781
+    ],
+    "price": [
+      0.79088,
+      0.38939,
+      0.85526,
+      0.55619
+    ],
+    "amount": [
+      0.92239,
+      0.3879,
+      0.99202,
+      0.55533
+    ]
+  },
+  "ocr_filter_profile": "faded",
+  "ocr_remove_colored_lines": false,
+  "ocr_show_filtered_preview": true,
+  "trained_at": "2026-07-06T14:19:32",
+  "trained_from_pdf": "C:/Users/Admin/Desktop/testdata/PO CMT/PO69110612.pdf",
+  "trained_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_141931.png",
+  "trained_filter_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_141931_filter_faded.png",
+  "ocr_hint": "ใช้กรอบสินค้า + filter ภาพก่อน OCR; ถ้าข้อมูลยังเพี้ยน ให้ลอง filter strong/line_clean แล้วล้าง Cache"
 }

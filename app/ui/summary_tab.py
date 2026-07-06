@@ -114,3 +114,68 @@ class SummaryTab(QWidget):
             if inv_id is not None:
                 self.ctx.store.delete_invoice(int(inv_id))
         self.refresh()
+
+# === PHASE12 CLEANUP DELETE ARABIC PATCH ===
+try:
+    from PySide6.QtWidgets import QPushButton as _Phase12Button, QMessageBox as _Phase12Msg
+    from PySide6.QtCore import Qt as _Phase12Qt
+    from ..arabic_digits import to_arabic_digits as _phase12_digits
+
+    def _phase12_summary_delete_selected(self):
+        table = getattr(self, "table", None)
+        if table is None:
+            return
+        rows = sorted({i.row() for i in table.selectedIndexes()}, reverse=True)
+        if not rows:
+            _Phase12Msg.information(self, "ลบสรุปรายเดือน", "กรุณาเลือกรายการที่ต้องการลบก่อน")
+            return
+        if _Phase12Msg.question(self, "ยืนยันการลบ", f"ต้องการลบสรุปรายเดือน {len(rows)} รายการที่เลือกหรือไม่?") != _Phase12Msg.Yes:
+            return
+        deleted = 0
+        for r in rows:
+            inv_id = None
+            try:
+                inv_id = table.item(r, 0).data(_Phase12Qt.UserRole)
+            except Exception:
+                pass
+            if inv_id is not None:
+                self.ctx.store.delete_invoice(int(inv_id)); deleted += 1
+            else:
+                table.removeRow(r); deleted += 1
+        try: self.refresh()
+        except Exception: pass
+        _Phase12Msg.information(self, "ลบสรุปรายเดือน", f"ลบรายการแล้ว {deleted} รายการ")
+
+    def _phase12_summary_build(self, *_a, **_kw):
+        _phase12_old_summary_build(self, *_a, **_kw)
+        try:
+            if not any("ลบ" in b.text() for b in self.findChildren(_Phase12Button)):
+                btn = _Phase12Button("🗑 ลบรายการที่เลือก")
+                btn.clicked.connect(self.delete_selected)
+                self.layout().insertWidget(0, btn)
+        except Exception:
+            pass
+
+    def _phase12_summary_refresh(self, *_a, **_kw):
+        res = _phase12_old_summary_refresh(self, *_a, **_kw)
+        try:
+            for r in range(self.table.rowCount()):
+                for c in range(self.table.columnCount()):
+                    it = self.table.item(r, c)
+                    if it:
+                        it.setText(_phase12_digits(it.text()))
+            if hasattr(self, "lbl_totals"):
+                self.lbl_totals.setText(_phase12_digits(self.lbl_totals.text()))
+        except Exception:
+            pass
+        return res
+
+    SummaryTab.delete_selected = _phase12_summary_delete_selected
+    if not getattr(SummaryTab, "_phase12_summary_patched", False):
+        _phase12_old_summary_build = SummaryTab._build
+        _phase12_old_summary_refresh = SummaryTab.refresh
+        SummaryTab._build = _phase12_summary_build
+        SummaryTab.refresh = _phase12_summary_refresh
+        SummaryTab._phase12_summary_patched = True
+except Exception:
+    pass

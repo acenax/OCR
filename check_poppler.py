@@ -1,65 +1,96 @@
-# -*- coding: utf-8 -*-
-"""Quick Poppler checker for TMC_OCR."""
 from __future__ import annotations
 
-from pathlib import Path
+import json
+import os
 import shutil
-import subprocess
-import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
 
 
-def candidate_dirs() -> list[Path]:
-    root = Path(__file__).resolve().parent
-    cands = []
-    for base in [root, root.parent, Path.cwd(), Path.cwd().parent]:
-        cands.extend([
-            base / "poppler" / "Library" / "bin",
-            base / "poppler" / "bin",
-            base / "poppler",
-        ])
-    cands.extend([
-        Path(r"C:\poppler\Library\bin"),
-        Path(r"C:\poppler\bin"),
-        Path(r"C:\Program Files\poppler\Library\bin"),
-        Path(r"C:\Program Files\poppler\bin"),
-    ])
-    out = []
-    seen = set()
-    for p in cands:
-        s = str(p)
-        if s not in seen:
-            seen.add(s)
-            out.append(p)
+def has_required(bin_dir: Path):
+    p = Path(str(bin_dir).strip().strip('"'))
+    if p.is_file():
+        p = p.parent
+    pdfinfo = (p / "pdfinfo.exe").exists() or (p / "pdfinfo").exists()
+    renderer = (p / "pdftoppm.exe").exists() or (p / "pdftocairo.exe").exists() or (p / "pdftoppm").exists() or (p / "pdftocairo").exists()
+    return pdfinfo, renderer
+
+
+def variants(x):
+    if not x:
+        return []
+    p = Path(str(x).strip().strip('"'))
+    out = [p]
+    if p.is_file():
+        out = [p.parent]
+    else:
+        out += [p / "Library" / "bin", p / "bin", p / "poppler" / "Library" / "bin", p / "poppler" / "bin"]
     return out
 
 
-def valid_bin(p: Path) -> bool:
-    return (p / "pdftoppm.exe").exists() or (p / "pdftocairo.exe").exists()
+raw = []
+settings = ROOT / "settings.json"
+if settings.exists():
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        raw.append(data.get("poppler_path"))
+    except Exception as e:
+        print("อ่าน settings.json ไม่ได้:", e)
 
+for k in ("POPPLER_PATH", "POPPLER_HOME"):
+    if os.environ.get(k):
+        raw.append(os.environ.get(k))
 
-def main() -> int:
-    which = shutil.which("pdftoppm") or shutil.which("pdftocairo")
-    if which:
-        print("พบ Poppler ใน PATH:", which)
-        try:
-            out = subprocess.run([which, "-v"], capture_output=True, text=True, timeout=10)
-            print((out.stdout or out.stderr).strip().splitlines()[0])
-        except Exception:
-            pass
-        return 0
+raw += [
+    ROOT / "poppler" / "Library" / "bin",
+    ROOT / "poppler" / "bin",
+    ROOT / "poppler",
+    ROOT.parent / "poppler" / "Library" / "bin",
+    ROOT.parent / "poppler" / "bin",
+    ROOT.parent / "poppler",
+    Path(r"D:\PROJECT\TMC INVOICE INPUT\poppler\Library\bin"),
+    Path(r"D:\PROJECT\TMC INVOICE INPUT\poppler\bin"),
+    Path(r"D:\PROJECT\TMC INVOICE INPUT\poppler"),
+    Path(r"C:\poppler\Library\bin"),
+    Path(r"C:\poppler\bin"),
+    Path(r"C:\poppler"),
+]
 
-    for p in candidate_dirs():
-        if valid_bin(p):
-            print("พบ Poppler:", p)
-            print("ให้นำ path นี้ไปตั้งในแท็บ ตั้งค่า > Poppler (โฟลเดอร์ bin)")
-            return 0
+for exe in ("pdfinfo", "pdfinfo.exe", "pdftoppm", "pdftoppm.exe", "pdftocairo", "pdftocairo.exe"):
+    found = shutil.which(exe)
+    if found:
+        raw.append(Path(found).parent)
 
-    print("ไม่พบ Poppler/pdftoppm.exe")
-    print("แก้ได้ 2 วิธี:")
-    print("1) นำโฟลเดอร์ poppler มาวางไว้ข้างโฟลเดอร์ TMC_OCR หรือใน TMC_OCR\\poppler")
-    print("2) ตั้งค่า Poppler ไปที่โฟลเดอร์ bin ที่มี pdftoppm.exe เช่น C:\\poppler\\Library\\bin")
-    return 1
+seen = set()
+print("=== Poppler Diagnostic ===")
+valid = []
+checked = 0
+for r in raw:
+    for c in variants(r):
+        key = str(c).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not c.exists():
+            continue
+        checked += 1
+        pdfinfo, renderer = has_required(c)
+        status = "OK" if pdfinfo and renderer else "MISSING"
+        print(f"[{status}] {c}")
+        print(f"  pdfinfo: {'OK' if pdfinfo else 'NO'}")
+        print(f"  renderer(pdftoppm/pdftocairo): {'OK' if renderer else 'NO'}")
+        if pdfinfo and renderer:
+            valid.append(c)
 
+print()
+if valid:
+    print("พบ Poppler ที่ใช้งานได้:")
+    print(valid[0])
+    print("\nให้นำ path นี้ไปใส่ในแท็บ ตั้งค่า > Poppler bin หรือปล่อยให้ hotfix ตั้งค่าให้")
+else:
+    print("ยังไม่พบ Poppler ที่ครบ")
+    print("ต้องมีทั้ง pdfinfo.exe และ pdftoppm.exe หรือ pdftocairo.exe ในโฟลเดอร์ bin เดียวกัน")
+    print("ตัวอย่าง path ที่ถูกต้อง: C:\\poppler\\Library\\bin")
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+print(f"\nตรวจโฟลเดอร์ที่มีอยู่ทั้งหมด: {checked} รายการ")

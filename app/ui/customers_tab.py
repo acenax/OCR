@@ -188,3 +188,63 @@ class CustomersTab(QWidget):
     def _notify(self):
         if self.on_changed:
             self.on_changed()
+
+# === PHASE12 CLEANUP DELETE ARABIC PATCH ===
+try:
+    from datetime import datetime as _Phase12DateTime
+    from pathlib import Path as _Phase12Path
+    import shutil as _phase12_shutil
+    from PySide6.QtWidgets import QPushButton as _Phase12Button, QMessageBox as _Phase12Msg
+
+    def _phase12_customer_delete_selected(self):
+        customer = self._selected_customer() if hasattr(self, "_selected_customer") else ""
+        if not customer:
+            _Phase12Msg.information(self, "ลบลูกค้า", "กรุณาเลือกลูกค้าที่ต้องการลบก่อน")
+            return
+        ans = _Phase12Msg.question(
+            self,
+            "ยืนยันลบลูกค้า",
+            f"ต้องการลบลูกค้า '{customer}' ออกจากรายการหรือไม่?\n\n"
+            "เพื่อความปลอดภัย ระบบจะไม่ลบทิ้งถาวร แต่จะย้ายโฟลเดอร์ลูกค้าไปไว้ใน _DELETED_CUSTOMERS",
+        )
+        if ans != _Phase12Msg.Yes:
+            return
+        try:
+            root = _Phase12Path(self.ctx.cfg["root_folder"])
+            src = root / customer
+            if not src.exists():
+                _Phase12Msg.warning(self, "ลบลูกค้า", f"ไม่พบโฟลเดอร์ลูกค้า:\n{src}")
+                self.refresh()
+                return
+            trash = root / "_DELETED_CUSTOMERS"
+            trash.mkdir(parents=True, exist_ok=True)
+            stamp = _Phase12DateTime.now().strftime("%Y%m%d_%H%M%S")
+            dest = trash / f"{customer}_{stamp}"
+            _phase12_shutil.move(str(src), str(dest))
+            self.refresh()
+            if hasattr(self, "_notify"):
+                self._notify()
+            _Phase12Msg.information(self, "ลบลูกค้า", f"ย้ายลูกค้า '{customer}' ออกจากรายการแล้ว\n\n{dest}")
+        except Exception as exc:
+            _Phase12Msg.critical(self, "ลบลูกค้าไม่สำเร็จ", str(exc))
+
+    def _phase12_customer_build(self, *_a, **_kw):
+        _phase12_customer_old_build(self, *_a, **_kw)
+        try:
+            if getattr(self, "_phase12_delete_button_added", False):
+                return
+            btn = _Phase12Button("🗑 ลบลูกค้าที่เลือก")
+            btn.setToolTip("ย้ายโฟลเดอร์ลูกค้าไปไว้ใน _DELETED_CUSTOMERS ไม่ลบทิ้งถาวร")
+            btn.clicked.connect(self.delete_selected_customer)
+            self.layout().addWidget(btn)
+            self._phase12_delete_button_added = True
+        except Exception:
+            pass
+
+    CustomersTab.delete_selected_customer = _phase12_customer_delete_selected
+    if not getattr(CustomersTab, "_phase12_delete_patched", False):
+        _phase12_customer_old_build = CustomersTab._build
+        CustomersTab._build = _phase12_customer_build
+        CustomersTab._phase12_delete_patched = True
+except Exception:
+    pass

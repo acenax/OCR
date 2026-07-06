@@ -1,33 +1,45 @@
-# Added by OCR phase 1 patch
-# Python
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
-.Python
-.venv/
-venv/
-env/
 
-# Build artifacts
+# Build / release
 build/
 dist/
-*.spec.bak
 
-# Local runtime/config/data
-settings.json
+# Runtime DB / config / logs
 *.db
 *.sqlite
 *.sqlite3
-*.log
+settings.json
 startup_trace.log
+startup_error.log
+*.log
+logs/
 
-# Office temporary files
-~$*.xlsx
-~$*.xls
-~$*.docx
+# OCR runtime/cache
+.ocr_cache/
+ocr_cache/
+mapping_memory.json
+.queue_deleted.json
+ocr_queue_status.json
+audit_log.json
+queue_status.json
 
-# OCR working/output folders (keep real customer data out of git)
-TMC INVOICE INPUT/
-**/PO FROM CUSTOMER/
-**/PRODUCT DETAIL/Product Details.xlsx
-**/INVOICE FILE/
+# Local backup/runtime folders
+bk/
+_REMOVED_FROM_OCR/
+_DELETED_CUSTOMERS/
+_patch_backup*/
+templates/_teaching_snapshots/
+
+# Patch installer files
+apply_*.py
+*_patch*.zip
+
+# Misc
+placeholder
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

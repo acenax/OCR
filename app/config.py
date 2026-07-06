@@ -141,3 +141,20 @@ def load_config() -> Config:
     TEMPLATE_DIR.mkdir(exist_ok=True)
     _seed_templates()
     return Config(data)
+
+
+# === PHASE7 AUTO PATH PATCH ===
+# Auto-fix invalid Tesseract/Poppler paths when settings.json was copied from another machine.
+try:
+    _phase7_original_load_config = load_config
+    def load_config() -> Config:  # type: ignore[no-redef]
+        cfg = _phase7_original_load_config()
+        try:
+            from .auto_paths import apply_auto_paths
+            apply_auto_paths(cfg, save=True)
+        except Exception:
+            pass
+        return cfg
+except Exception:
+    pass
+# === END PHASE7 AUTO PATH PATCH ===

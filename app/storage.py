@@ -124,3 +124,24 @@ class Store:
             "DELETE FROM invoices WHERE month < strftime('%Y-%m','now','-{} month')".format(keep_months))
         con.commit()
         con.close()
+
+# === PHASE12 CLEANUP DELETE ARABIC PATCH ===
+try:
+    from .arabic_digits import normalize_obj_digits as _phase12_norm_doc, to_arabic_digits as _phase12_digits
+    _phase12_old_save_invoice = Store.save_invoice
+    _phase12_old_list_invoices = Store.list_invoices
+    def _phase12_save_invoice(self, doc, excel_path):
+        _phase12_norm_doc(doc)
+        excel_path = _phase12_digits(excel_path)
+        return _phase12_old_save_invoice(self, doc, excel_path)
+    def _phase12_list_invoices(self, *args, **kwargs):
+        rows = _phase12_old_list_invoices(self, *args, **kwargs)
+        for row in rows:
+            for k, v in list(row.items()):
+                if isinstance(v, str):
+                    row[k] = _phase12_digits(v)
+        return rows
+    Store.save_invoice = _phase12_save_invoice
+    Store.list_invoices = _phase12_list_invoices
+except Exception:
+    pass
