@@ -3,78 +3,78 @@
   "mode": "anchors",
   "number_mode": "fixed2",
   "name_below": false,
-  "data_top_frac": 0.38097,
-  "bottom_frac": 0.56081,
+  "data_top_frac": 0.37935,
+  "bottom_frac": 0.60685,
   "columns": {
     "item": [
-      0.07817,
+      0.07587,
       0.10959
     ],
     "code": [
-      0.13718,
-      0.21228
+      0.13565,
+      0.20845
     ],
     "desc": [
-      0.27742,
-      0.53262
+      0.27895,
+      0.53875
     ],
     "qty": [
-      0.67746,
-      0.74797
+      0.68283,
+      0.75256
     ],
     "price": [
-      0.79088,
-      0.85526
+      0.79625,
+      0.85755
     ],
     "amount": [
-      0.92239,
+      0.92058,
       0.99202
     ]
   },
   "boxes": {
     "item": [
-      0.07817,
-      0.38397,
+      0.07587,
+      0.38614,
       0.10959,
-      0.55131
+      0.60114
     ],
     "code": [
-      0.13718,
-      0.38397,
-      0.21228,
-      0.55511
+      0.13565,
+      0.38668,
+      0.20845,
+      0.59951
     ],
     "desc": [
-      0.27742,
+      0.27895,
       0.38397,
-      0.53262,
-      0.54861
+      0.53875,
+      0.60114
     ],
     "qty": [
-      0.67746,
-      0.38884,
-      0.74797,
-      0.55781
+      0.68283,
+      0.38668,
+      0.75256,
+      0.59681
     ],
     "price": [
-      0.79088,
-      0.38939,
-      0.85526,
-      0.55619
+      0.79625,
+      0.38235,
+      0.85755,
+      0.60385
     ],
     "amount": [
-      0.92239,
-      0.3879,
+      0.92058,
+      0.38279,
       0.99202,
-      0.55533
+      0.60262
     ]
   },
   "ocr_filter_profile": "faded",
-  "ocr_remove_colored_lines": false,
+  "ocr_remove_colored_lines": true,
   "ocr_show_filtered_preview": true,
-  "trained_at": "2026-07-06T14:19:32",
-  "trained_from_pdf": "C:/Users/Admin/Desktop/testdata/PO CMT/PO69110612.pdf",
-  "trained_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_141931.png",
-  "trained_filter_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_141931_filter_faded.png",
+  "trained_at": "2026-07-06T14:52:56",
+  "trained_from_pdf": "C:/Users/Admin/Desktop/testdata/PO CMT/PO69110614.pdf",
+  "trained_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_145256.png",
+  "trained_filter_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_145256_filter_faded.png",
   "ocr_hint": "ใช้กรอบสินค้า + filter ภาพก่อน OCR; ถ้าข้อมูลยังเพี้ยน ให้ลอง filter strong/line_clean แล้วล้าง Cache"
 }

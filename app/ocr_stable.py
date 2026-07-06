@@ -39,38 +39,13 @@ def normalize_digits(text: str) -> str:
     return str(text or "").translate(trans)
 
 def parse_num(text: str, field: str = "money") -> float | None:
-    s = normalize_digits(text)
-    s = s.replace(" ", "").replace("'", "").replace("`", "")
-    s = s.replace("—", "-").replace("–", "-")
-    s = re.sub(r"[^0-9,\.\-]", "", s)
-    if not re.search(r"\d", s):
-        return None
-
-    last_dot = s.rfind(".")
-    last_comma = s.rfind(",")
-    dec_pos = max(last_dot, last_comma)
-    if dec_pos >= 0:
-        dec_digits = re.sub(r"\D", "", s[dec_pos+1:])
-        # Treat the last separator as decimal only when it has 1-3 following digits.
-        if len(dec_digits) in (1, 2, 3):
-            int_part = re.sub(r"\D", "", s[:dec_pos]) or "0"
-            if len(dec_digits) > 2 and field != "price":
-                dec_digits = dec_digits[:2]
-            try:
-                return float(int_part + "." + dec_digits)
-            except Exception:
-                pass
-
-    digits = re.sub(r"\D", "", s)
-    if not digits:
-        return None
-
-    if field in {"qty", "price", "amount", "money"} and len(digits) > 2:
-        return int(digits) / 100.0
-    try:
-        return float(digits)
-    except Exception:
-        return None
+    # Delegates to the single shared parser (app/ocr_numbers.py) so this
+    # engine agrees with ocr.py / ocr_tuning.py / ocr_template_v2.py on
+    # where the decimal point goes for qty/price/amount. See that module
+    # for why "always divide by 100" beats trying to detect a "." that
+    # faint dot-matrix scans frequently fail to OCR.
+    from .ocr_numbers import parse_scanned_number
+    return parse_scanned_number(text, field)
 
 def fmt_text_for_code(text: str) -> str:
     s = normalize_digits(text).strip()
@@ -90,6 +65,14 @@ def enhance_for_ocr(pil_img: Image.Image, numeric: bool = False) -> Image.Image:
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(20, arr.shape[1] // 12), 1))
     lines = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, h_kernel, iterations=1)
     arr[lines > 0] = [255, 255, 255]
+
+    # Also remove plain black/grey table gridlines. The filter above only
+    # catches saturated (colored) pixels, so an ordinary table border slips
+    # through untouched — and a sliver of it inside a field crop is what
+    # causes the tha+eng model to hallucinate a stray Thai character in
+    # front of an otherwise pure-English description (e.g. "ปี16 TRAG...").
+    from .ocr_text import remove_table_gridlines
+    arr = remove_table_gridlines(arr)
 
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     gray = cv2.fastNlMeansDenoising(gray, None, 8, 7, 21)
@@ -244,8 +227,16 @@ def normalize_box(box: tuple[float, float, float, float], W: int, H: int) -> tup
     y2 = max(y1 + 2, min(H, y2))
     return x1, y1, x2, y2
 
-def crop_box(pil_img: Image.Image, box_px: tuple[int, int, int, int], pad: int = 2) -> Image.Image:
+def crop_box(pil_img: Image.Image, box_px: tuple[int, int, int, int], pad: int = 2, inset: bool = False) -> Image.Image:
     W, H = pil_img.size
+    if inset:
+        # Shrink inward instead of padding outward. Used for text fields
+        # (desc/code) so we don't drag an adjacent table gridline into the
+        # crop, which is what causes hallucinated Thai characters in an
+        # otherwise pure-English description.
+        from .ocr_text import inset_box
+        x1, y1, x2, y2 = inset_box(box_px, W, H, inset_px=max(2, pad))
+        return pil_img.crop((x1, y1, x2, y2))
     x1, y1, x2, y2 = box_px
     return pil_img.crop((max(0, x1-pad), max(0, y1-pad), min(W, x2+pad), min(H, y2+pad)))
 
@@ -339,7 +330,7 @@ def build_po_document(pil_img: Image.Image, lang: str, template: dict | None = N
     field_entries: dict[str, list[dict[str, Any]]] = {}
     all_entries_for_rows = []
     for field, box in boxes.items():
-        im = crop_box(pil_img, box)
+        im = crop_box(pil_img, box, inset=(field in {"desc", "code"}))
         lines = tesseract_lines(im, field, box)
         field_entries[field] = lines
         if field in {"item", "code", "qty", "amount"}:
@@ -365,6 +356,9 @@ def build_po_document(pil_img: Image.Image, lang: str, template: dict | None = N
 
         code = fmt_text_for_code(raw.get("code", ""))
         desc = re.sub(r"\s+", " ", raw.get("desc", "")).strip()
+        from .ocr_text import clean_ocr_text
+        code = clean_ocr_text(code)
+        desc = clean_ocr_text(desc)
         item_val = parse_num(raw.get("item", ""), "item")
         item = str(int(item_val)) if item_val is not None else str(row_idx)
         qty = parse_num(raw.get("qty", ""), "qty")

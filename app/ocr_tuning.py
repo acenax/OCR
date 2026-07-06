@@ -71,28 +71,12 @@ def _parse_normal_number(token: str) -> Optional[float]:
 
 
 def parse_field_number(text: Any, field: str = "money") -> Optional[float]:
-    cands = _numeric_candidates(text)
-    if not cands:
-        return None
-    token = cands[-1]
-    raw = token.replace(",", "")
-    if "." in token or "," in token:
-        return _parse_normal_number(token)
-    digits = re.sub(r"\D", "", raw)
-    if not digits:
-        return None
-    n = int(digits)
-    if field == "qty":
-        if len(digits) >= 4 and digits.endswith("00"):
-            return n / 100.0
-        return float(n)
-    if field in {"price", "money", "amount"}:
-        if len(digits) >= 5:
-            return n / 100.0
-        if len(digits) == 4 and digits.endswith("00"):
-            return n / 100.0
-        return float(n)
-    return float(n)
+    # Delegates to the single shared parser (app/ocr_numbers.py). The old
+    # version here only divided by 100 when the digit string happened to
+    # end in "00" (or had 5+ digits), which silently mis-parsed real cents
+    # like ".08" and disagreed with the other OCR engine modules.
+    from .ocr_numbers import parse_scanned_number
+    return parse_scanned_number(text, field)
 
 
 def money(v: Any) -> float:
@@ -122,6 +106,15 @@ def _remove_coloured_horizontal_lines(rgb: np.ndarray) -> np.ndarray:
     if h_lines.any():
         h_lines = cv2.dilate(h_lines, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
         out[h_lines > 0] = (255, 255, 255)
+    # Also strip plain black/grey table gridlines, which the colour filter
+    # above misses (it only looks at saturated pixels). A sliver of table
+    # border pulled into a desc/code crop is what causes Tesseract's
+    # tha+eng model to hallucinate a stray Thai character.
+    try:
+        from .ocr_text import remove_table_gridlines
+        out = remove_table_gridlines(out)
+    except Exception:
+        pass
     return out
 
 
@@ -242,7 +235,19 @@ def template_boxes(profile: Dict[str, Any], w: int, h: int) -> Dict[str, Tuple[f
 
 def _ocr_lines_for_box(pil_img: Image.Image, box: Tuple[float, float, float, float], field: str, lang: str) -> List[Dict[str, Any]]:
     kind = FIELD_KINDS.get(field, "text")
-    crop = _crop(pil_img, box, pad=4)
+    if field in {"desc", "code"}:
+        # Inset instead of pad outward — see ocr_text.py docstring for why:
+        # padding outward toward a table gridline is what lets a
+        # hallucinated Thai glyph slip in front of pure-English text.
+        w, h = pil_img.size
+        from .ocr_text import inset_box
+        x1, y1, x2, y2 = inset_box(
+            (int(box[0]), int(box[1]), int(box[2]), int(box[3])), w, h, inset_px=2
+        )
+        crop = pil_img.crop((x1, y1, x2, y2))
+        box = (x1, y1, x2, y2)
+    else:
+        crop = _crop(pil_img, box, pad=4)
     proc = preprocess_crop(crop, kind=kind, scale=3)
     lines = _safe_ocr_data(proc, field, lang)
     scale = 3.0
@@ -367,6 +372,9 @@ def build_template_document(pil_img: Image.Image, lang: str, template: Dict[str,
         amount_ln = _nearest(by_field.get("amount", []), y, tol)
         desc = normalize_text(desc_ln.get("text", "") if desc_ln else "")
         code = normalize_text(code_ln.get("text", "") if code_ln else "")
+        from .ocr_text import clean_ocr_text
+        desc = clean_ocr_text(desc)
+        code = clean_ocr_text(code)
         if not desc and not code:
             continue
         q = _line_number(qty_ln, "qty") or 0.0

@@ -173,12 +173,29 @@ def _normalize_boxes(profile: dict, W: int, H: int) -> dict[str, tuple[int, int,
             t, b = t * sy, b * sy
         x1, x2 = sorted((int(round(l)), int(round(r))))
         y1, y2 = sorted((int(round(t)), int(round(b))))
-        pad_x = max(2, int((x2 - x1) * 0.03))
-        pad_y = max(2, int((y2 - y1) * 0.01))
-        x1 = max(0, x1 - pad_x)
-        x2 = min(W, x2 + pad_x)
-        y1 = max(0, y1 - pad_y)
-        y2 = min(H, y2 + pad_y)
+        if f in {"desc", "code"}:
+            # Inset instead of pad outward: numeric/item fields use a
+            # tesseract whitelist so they can't ever produce a stray Thai
+            # character, but desc/code run the full tha+eng model. Padding
+            # outward toward a table gridline is what lets a hallucinated
+            # Thai glyph slip in front of an otherwise pure-English value.
+            pad_x = max(2, int((x2 - x1) * 0.02))
+            pad_y = max(1, int((y2 - y1) * 0.02))
+            x1 = min(x1 + pad_x, x2 - 4)
+            x2 = max(x2 - pad_x, x1 + 4)
+            y1 = min(y1 + pad_y, y2 - 4)
+            y2 = max(y2 - pad_y, y1 + 4)
+        else:
+            pad_x = max(2, int((x2 - x1) * 0.03))
+            pad_y = max(2, int((y2 - y1) * 0.01))
+            x1 = x1 - pad_x
+            x2 = x2 + pad_x
+            y1 = y1 - pad_y
+            y2 = y2 + pad_y
+        x1 = max(0, x1)
+        x2 = min(W, x2)
+        y1 = max(0, y1)
+        y2 = min(H, y2)
         if x2 - x1 > 5 and y2 - y1 > 5:
             out[f] = (x1, y1, x2, y2)
     return out
@@ -196,6 +213,13 @@ def _remove_colored_lines(rgb: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)
     mask &= gray > 80
     out[mask] = [255, 255, 255]
+    # Also strip plain black/grey table gridlines. The mask above only
+    # catches saturated (colored) pixels, so an ordinary table border is
+    # untouched by it — and a sliver of it inside a field crop is what
+    # causes the tha+eng model to hallucinate a stray Thai character in
+    # front of an otherwise pure-English description.
+    from .ocr_text import remove_table_gridlines
+    out = remove_table_gridlines(out)
     return out
 
 
@@ -248,28 +272,15 @@ def _clean_text(s: str) -> str:
 
 
 def _parse_number(text: str, field: str) -> float | None:
-    s = str(text or "")
-    s = s.translate(str.maketrans("๐๑๒๓๔๕๖๗๘๙٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹０１２３４５６７８９", "0123456789012345678901234567890123456789"))
-    s = s.replace("O", "0").replace("o", "0").replace("l", "1").replace("I", "1")
-    s = re.sub(r"[^0-9,\.\-]", "", s)
-    if not s:
-        return None
-    # pick the longest number-looking token
-    toks = re.findall(r"-?[0-9][0-9,]*(?:\.[0-9]+)?", s)
-    token = max(toks, key=len) if toks else s
-    token = token.replace(",", "")
-    try:
-        return float(token)
-    except Exception:
-        pass
-    digits = re.sub(r"\D", "", token)
-    if not digits:
-        return None
-    val = float(int(digits))
-    if field in ("qty", "price", "amount") and len(digits) >= 3:
-        # dot-matrix fallback when decimal point is lost
-        return val / 100.0
-    return val
+    # NOTE: this used to try float(token) first and only fall back to the
+    # "divide by 100" dot-matrix repair when that raised an exception. A
+    # plain digit string like "1000" parses as a float with no exception,
+    # so that fallback was essentially dead code — it's exactly why rows
+    # like qty "1000" were coming out as 1000 instead of the true 10.00.
+    # All qty/price/amount parsing now goes through the single shared,
+    # deterministic parser in ocr_numbers.py.
+    from .ocr_numbers import parse_scanned_number
+    return parse_scanned_number(text, field)
 
 
 def _horizontal_text_centers(pil_img: Image.Image, boxes: dict[str, tuple[int, int, int, int]]) -> list[float]:
@@ -432,6 +443,9 @@ def build_po_document_template_v2(pil_img: Image.Image, lang: str, template: dic
         item_txt = _ocr_text(crop_field("item"), lang, "item") if crop_field("item") else str(idx)
         code_txt = _ocr_text(crop_field("code"), lang, "code") if crop_field("code") else ""
         desc_txt = _ocr_text(crop_field("desc"), lang, "desc") if crop_field("desc") else ""
+        from .ocr_text import clean_ocr_text
+        code_txt = clean_ocr_text(code_txt)
+        desc_txt = clean_ocr_text(desc_txt)
         qty_txt = _ocr_text(crop_field("qty"), lang, "qty") if crop_field("qty") else ""
         price_txt = _ocr_text(crop_field("price"), lang, "price") if crop_field("price") else ""
         amount_txt = _ocr_text(crop_field("amount"), lang, "amount") if crop_field("amount") else ""

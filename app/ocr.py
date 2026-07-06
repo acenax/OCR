@@ -75,8 +75,13 @@ def parse_fixed(text, scale: int = 100) -> float | None:
 def parse_money(text) -> float | None:
     """Parse scanned money/qty cells. For these POs, dots/commas are often lost,
     so digits/100 is the most stable representation.
+
+    Now delegates to the shared parser in ocr_numbers.py so this stays in
+    sync with ocr_tuning.py / ocr_stable.py / ocr_template_v2.py, which
+    previously each guessed the decimal position differently.
     """
-    return parse_fixed(text, 100)
+    from .ocr_numbers import parse_scanned_number
+    return parse_scanned_number(text, "amount")
 
 
 def parse_decimal(text) -> float | None:
@@ -98,7 +103,8 @@ def _parse_num(text, number_mode: str = "fixed2", column: str = "") -> float | N
     0.0062 or 3,487.50 becoming 3.49 after OCR noise.
     """
     if column in NUMERIC_COLS:
-        v = parse_fixed(text, 100)
+        from .ocr_numbers import parse_scanned_number
+        v = parse_scanned_number(text, column)
         if v is not None:
             return v
     if number_mode == "fixed3":
@@ -120,6 +126,8 @@ def render_pdf(path: str, dpi: int, poppler_path: str | None = None) -> list[Ima
 def preprocess(pil_img: Image.Image) -> np.ndarray:
     """High-contrast preprocessing for faint/colour-shifted scans."""
     rgb = np.array(pil_img.convert("RGB"))
+    from .ocr_text import remove_table_gridlines
+    rgb = remove_table_gridlines(rgb)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     # remove mild colour cast / uneven background
     gray = cv2.bilateralFilter(gray, 5, 45, 45)
@@ -386,9 +394,10 @@ def _cluster_rows(body: pd.DataFrame) -> list[pd.DataFrame]:
 
 
 def _line_from_cells(cells: dict[str, list[str]], number_mode: str) -> POLine | None:
+    from .ocr_text import clean_ocr_text
     item = " ".join(cells.get("item", [])).strip()
-    code = " ".join(cells.get("code", [])).strip()
-    desc = " ".join(cells.get("desc", [])).strip()
+    code = clean_ocr_text(" ".join(cells.get("code", [])).strip())
+    desc = clean_ocr_text(" ".join(cells.get("desc", [])).strip())
     qty = _parse_num(" ".join(cells.get("qty", [])), number_mode, "qty")
     price = _parse_num(" ".join(cells.get("price", [])), number_mode, "price")
     amount = _parse_num(" ".join(cells.get("amount", [])), number_mode, "amount")
