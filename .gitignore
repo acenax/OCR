@@ -3,6 +3,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Virtual env
+.venv/
+venv/
+env/
+.venv_paddle/
+.venv_paddle27/
+
 # Build / release
 build/
 dist/
@@ -26,6 +33,11 @@ ocr_queue_status.json
 audit_log.json
 queue_status.json
 
+# Paddle / model cache
+.paddlex/
+.paddleocr/
+.paddle/
+
 # Local backup/runtime folders
 bk/
 _REMOVED_FROM_OCR/
@@ -43,3 +55,4 @@ placeholder
 Thumbs.db
 .vscode/
 .idea/
+test_paddle_ocr.py
