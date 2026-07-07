@@ -1,9 +1,15 @@
 
+"""PaddleOCR-first template OCR engine.
+
+This replaces the old Tesseract-first template reader.  When a customer has
+been taught column boxes, PaddleOCR is used as the primary engine and the
+returned bounding boxes are mapped into the taught columns/rows.
+"""
+
 from __future__ import annotations
 
-import math
 import re
-from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any
 
 import cv2
@@ -12,527 +18,351 @@ import pytesseract
 from PIL import Image
 
 from .models import PODocument, POLine
+from .ocr_image_filters import enhance_for_ocr
+from .ocr_numbers import normalize_digits, parse_scanned_number
+from .ocr_text import clean_part_description, clean_product_code, clean_ocr_text
+from .paddle_ocr_engine import OCRWord, extract_words, words_to_text
 
-FIELD_ALIASES = {
-    "item": {"item", "ลำดับ", "seq", "no", "no.", "number"},
-    "code": {"code", "product_code", "product code", "รหัสสินค้า", "รหัสสินค้าฝั่งลูกค้า", "customer_code"},
-    "desc": {"desc", "description", "name", "product_name", "ชื่อสินค้า", "รายการ", "ชื่อสินค้า/รายการ"},
-    "qty": {"qty", "quantity", "จำนวน", "q'ty", "q ty"},
-    "price": {"price", "unit_price", "unit price", "ราคา", "ราคา/หน่วย", "หน่วยละ"},
-    "amount": {"amount", "total", "line_total", "จำนวนเงิน", "ยอดเงิน", "ยอดเงิน ocr"},
+COLUMN_KEYS = ["item", "code", "desc", "qty", "price", "amount"]
+NUMERIC_KEYS = {"qty", "price", "amount"}
+
+TESS_CONFIGS = {
+    "item": "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789",
+    "code": "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_/.",
+    "desc": "--oem 3 --psm 6",
+    "qty": "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,-",
+    "price": "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,-",
+    "amount": "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,-",
 }
 
-NUMERIC_FIELDS = {"qty", "price", "amount"}
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
-def _canon_field(name: str) -> str:
-    raw = str(name or "").strip().lower().replace("_", " ")
-    for key, aliases in FIELD_ALIASES.items():
-        if raw in aliases:
-            return key
-    # fuzzy contains fallback
-    if "amount" in raw or "จำนวนเงิน" in raw or "ยอดเงิน" in raw:
-        return "amount"
-    if "price" in raw or "ราคา" in raw or "หน่วยละ" in raw:
-        return "price"
-    if "qty" in raw or "quantity" in raw or "จำนวน" in raw:
-        return "qty"
-    if "description" in raw or "รายการ" in raw or "ชื่อสินค้า" in raw:
-        return "desc"
-    if "code" in raw or "รหัส" in raw:
-        return "code"
-    if "item" in raw or "ลำดับ" in raw:
-        return "item"
-    return raw
-
-
-def _to_float_box(value: Any) -> list[float] | None:
-    """Accept multiple template formats and return [l,t,r,b] or None."""
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        keys = {k.lower(): k for k in value.keys()}
-        def pick(*names, default=None):
-            for n in names:
-                if n in keys:
-                    return value[keys[n]]
-            return default
-        l = pick("left", "x", "x1", "lo")
-        t = pick("top", "y", "y1", default=None)
-        r = pick("right", "x2", "hi")
-        b = pick("bottom", "y2", default=None)
-        w = pick("width", "w", default=None)
-        h = pick("height", "h", default=None)
-        if r is None and l is not None and w is not None:
-            r = float(l) + float(w)
-        if b is None and t is not None and h is not None:
-            b = float(t) + float(h)
-        if l is not None and r is not None:
-            if t is None:
-                t = 0.0
-            if b is None:
-                b = 1.0
-            try:
-                return [float(l), float(t), float(r), float(b)]
-            except Exception:
-                return None
-    if isinstance(value, (list, tuple)):
-        try:
-            vals = [float(x) for x in value]
-        except Exception:
-            return None
-        if len(vals) >= 4:
-            l, t, r, b = vals[:4]
-            return [l, t, r, b]
-        if len(vals) == 2:
-            # old format: [x_left_frac, x_right_frac], y is supplied separately
-            l, r = vals
-            return [l, 0.0, r, 1.0]
-    return None
-
-
-def _collect_raw_boxes(profile: dict) -> dict[str, list[float]]:
-    boxes: dict[str, list[float]] = {}
-    for key_name in ("boxes", "field_boxes", "columns_full", "column_boxes", "rects", "fields"):
-        obj = profile.get(key_name)
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                f = _canon_field(k)
-                box = _to_float_box(v)
-                if f and box:
-                    boxes[f] = box
-    cols = profile.get("columns")
-    if isinstance(cols, dict):
-        for k, v in cols.items():
-            f = _canon_field(k)
-            box = _to_float_box(v)
-            if f and box:
-                boxes.setdefault(f, box)
-    return boxes
-
-
-def _profile_image_size(profile: dict) -> tuple[float | None, float | None]:
-    keys_w = ["image_width", "page_width", "pixmap_width", "snapshot_width", "teaching_width", "width"]
-    keys_h = ["image_height", "page_height", "pixmap_height", "snapshot_height", "teaching_height", "height"]
-    w = h = None
-    for k in keys_w:
-        if k in profile:
-            try:
-                w = float(profile[k])
-                break
-            except Exception:
-                pass
-    for k in keys_h:
-        if k in profile:
-            try:
-                h = float(profile[k])
-                break
-            except Exception:
-                pass
-    return w, h
-
-
-def _normalize_boxes(profile: dict, W: int, H: int) -> dict[str, tuple[int, int, int, int]]:
-    raw = _collect_raw_boxes(profile)
-    if not raw:
-        return {}
-    prof_w, prof_h = _profile_image_size(profile)
-    # y range for old x-only columns
-    data_top = float(profile.get("data_top_frac", 0.0) or 0.0)
-    bottom = float(profile.get("bottom_frac", 1.0) or 1.0)
-
-    max_val = max(max(abs(x) for x in box) for box in raw.values())
-    looks_normalized = max_val <= 1.5
-    sx = sy = 1.0
-    if not looks_normalized and prof_w and prof_h and prof_w > 10 and prof_h > 10:
-        sx, sy = W / prof_w, H / prof_h
-    elif not looks_normalized:
-        # Heuristic for old teaching coordinates saved from the visible image, not the render size.
-        # If all boxes occupy a narrow apparent page, scale them to current image width/height.
-        max_r = max(b[2] for b in raw.values())
-        max_b = max(b[3] for b in raw.values())
-        min_l = min(b[0] for b in raw.values())
-        min_t = min(b[1] for b in raw.values())
-        if 100 < max_r < W * 0.75:
-            sx = W / max(max_r + min_l, max_r)
-        if 100 < max_b < H * 0.75:
-            sy = H / max(max_b + min_t, max_b)
-
+def _profile_boxes(profile: dict | None, width: int, height: int) -> dict[str, tuple[int, int, int, int]]:
+    profile = profile or {}
     out: dict[str, tuple[int, int, int, int]] = {}
-    for f, box in raw.items():
-        l, t, r, b = box
-        # old columns often store only x fractions with y=0,b=1
-        if f in raw and abs(t) < 1e-9 and abs(b - 1.0) < 1e-9:
-            t = data_top
-            b = bottom
-        if looks_normalized:
-            l, r = l * W, r * W
-            t, b = t * H, b * H
-        else:
-            l, r = l * sx, r * sx
-            t, b = t * sy, b * sy
-        x1, x2 = sorted((int(round(l)), int(round(r))))
-        y1, y2 = sorted((int(round(t)), int(round(b))))
-        if f in {"desc", "code"}:
-            # Inset instead of pad outward: numeric/item fields use a
-            # tesseract whitelist so they can't ever produce a stray Thai
-            # character, but desc/code run the full tha+eng model. Padding
-            # outward toward a table gridline is what lets a hallucinated
-            # Thai glyph slip in front of an otherwise pure-English value.
-            pad_x = max(2, int((x2 - x1) * 0.02))
-            pad_y = max(1, int((y2 - y1) * 0.02))
-            x1 = min(x1 + pad_x, x2 - 4)
-            x2 = max(x2 - pad_x, x1 + 4)
-            y1 = min(y1 + pad_y, y2 - 4)
-            y2 = max(y2 - pad_y, y1 + 4)
-        else:
-            pad_x = max(2, int((x2 - x1) * 0.03))
-            pad_y = max(2, int((y2 - y1) * 0.01))
-            x1 = x1 - pad_x
-            x2 = x2 + pad_x
-            y1 = y1 - pad_y
-            y2 = y2 + pad_y
-        x1 = max(0, x1)
-        x2 = min(W, x2)
-        y1 = max(0, y1)
-        y2 = min(H, y2)
-        if x2 - x1 > 5 and y2 - y1 > 5:
-            out[f] = (x1, y1, x2, y2)
+
+    boxes = profile.get("boxes") or profile.get("field_boxes") or profile.get("rects")
+    if isinstance(boxes, dict):
+        for key, raw in boxes.items():
+            if key not in COLUMN_KEYS:
+                continue
+            if isinstance(raw, dict):
+                vals = [
+                    raw.get("left", raw.get("x1", 0)),
+                    raw.get("top", raw.get("y1", 0)),
+                    raw.get("right", raw.get("x2", 0)),
+                    raw.get("bottom", raw.get("y2", 0)),
+                ]
+            else:
+                vals = list(raw)[:4] if isinstance(raw, (list, tuple)) else []
+            if len(vals) < 4:
+                continue
+            l, t, r, b = [_as_float(v) for v in vals]
+            if max(abs(l), abs(t), abs(r), abs(b)) <= 1.5:
+                l, r = l * width, r * width
+                t, b = t * height, b * height
+            l, r = sorted((l, r))
+            t, b = sorted((t, b))
+            if r - l >= 4 and b - t >= 4:
+                out[key] = (max(0, int(l)), max(0, int(t)), min(width, int(r)), min(height, int(b)))
+    if out:
+        return out
+
+    columns = profile.get("columns") or {}
+    if isinstance(columns, dict):
+        top = _as_float(profile.get("data_top_frac", 0.28))
+        bottom = _as_float(profile.get("bottom_frac", 0.78))
+        if top <= 1.5:
+            top *= height
+        if bottom <= 1.5:
+            bottom *= height
+        for key, raw in columns.items():
+            if key not in COLUMN_KEYS:
+                continue
+            try:
+                l, r = float(raw[0]), float(raw[1])
+            except Exception:
+                continue
+            if max(abs(l), abs(r)) <= 1.5:
+                l, r = l * width, r * width
+            l, r = sorted((l, r))
+            if r - l >= 4:
+                out[key] = (max(0, int(l)), max(0, int(top)), min(width, int(r)), min(height, int(bottom)))
     return out
 
 
-def _remove_colored_lines(rgb: np.ndarray) -> np.ndarray:
-    """Remove red/green/blue scanner artifacts while keeping dark text."""
-    out = rgb.copy()
-    hsv = cv2.cvtColor(out, cv2.COLOR_RGB2HSV)
-    # high saturation, medium/high value = colored line/noise
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
-    mask = (sat > 70) & (val > 70)
-    # preserve very dark pixels because those are likely text/table strokes
-    gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)
-    mask &= gray > 80
-    out[mask] = [255, 255, 255]
-    # Also strip plain black/grey table gridlines. The mask above only
-    # catches saturated (colored) pixels, so an ordinary table border is
-    # untouched by it — and a sliver of it inside a field crop is what
-    # causes the tha+eng model to hallucinate a stray Thai character in
-    # front of an otherwise pure-English description.
-    from .ocr_text import remove_table_gridlines
-    out = remove_table_gridlines(out)
-    return out
+def _crop(image: Image.Image, box: tuple[int, int, int, int], pad: int = 2) -> Image.Image:
+    w, h = image.size
+    l, t, r, b = box
+    return image.crop((max(0, l - pad), max(0, t - pad), min(w, r + pad), min(h, b + pad)))
 
 
-def _prep_for_ocr(pil: Image.Image, numeric: bool = False, scale: int = 3) -> Image.Image:
-    rgb = np.array(pil.convert("RGB"))
-    rgb = _remove_colored_lines(rgb)
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    # contrast boost
-    gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    if numeric:
-        # numbers are faint: enlarge first, then threshold
-        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 31, 12)
-    else:
-        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 35, 11)
-    return Image.fromarray(th)
+def _prepare_image(image: Image.Image, filter_mode: str, remove_lines: bool) -> Image.Image:
+    arr = enhance_for_ocr(image, mode=filter_mode, remove_color_lines=remove_lines)
+    if isinstance(arr, np.ndarray):
+        if arr.ndim == 2:
+            return Image.fromarray(arr).convert("RGB")
+        return Image.fromarray(arr).convert("RGB")
+    return image.convert("RGB")
 
 
-def _ocr_text(pil: Image.Image, lang: str, field: str, psm: int = 7) -> str:
-    numeric = field in NUMERIC_FIELDS or field == "item"
-    img = _prep_for_ocr(pil, numeric=numeric, scale=4 if numeric else 3)
-    if field in ("qty", "price", "amount"):
-        cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789.,-"
-        use_lang = "eng"
-    elif field == "item":
-        cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789"
-        use_lang = "eng"
-    elif field == "code":
-        cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-./"
-        use_lang = "eng"
-    else:
-        cfg = f"--oem 3 --psm {psm}"
-        use_lang = lang or "tha+eng"
+def _intersects_box(word: OCRWord, box: tuple[int, int, int, int], y_band: tuple[int, int] | None = None) -> bool:
+    l, t, r, b = box
+    cy = word.cy
+    cx = word.cx
+    if y_band is not None:
+        yt, yb = y_band
+        if not (yt <= cy <= yb):
+            return False
+    return (l - 3) <= cx <= (r + 3) and (t - 5) <= cy <= (b + 5)
+
+
+def _words_in_cell(words: list[OCRWord], box: tuple[int, int, int, int], y_band: tuple[int, int]) -> list[OCRWord]:
+    return sorted([w for w in words if _intersects_box(w, box, y_band)], key=lambda w: (w.top, w.left))
+
+
+def _cell_text(words: list[OCRWord], key: str) -> tuple[str, float]:
+    if not words:
+        return "", -1.0
+    text = " ".join(w.text for w in words).strip()
+    confs = [w.confidence for w in words if w.confidence >= 0]
+    conf = float(sum(confs) / len(confs)) if confs else -1.0
+    text = normalize_digits(text)
+    if key == "code":
+        return clean_product_code(text), conf
+    if key == "desc":
+        return clean_part_description(text), conf
+    return clean_ocr_text(text), conf
+
+
+def _fallback_tesseract_cell(image: Image.Image, key: str, lang: str, filter_mode: str, remove_lines: bool) -> tuple[str, float]:
+    config = TESS_CONFIGS.get(key, "--oem 3 --psm 7")
+    use_lang = "eng" if key in {"item", "code", "qty", "price", "amount"} else (lang or "tha+eng")
+    proc = enhance_for_ocr(image, mode=filter_mode, remove_color_lines=remove_lines)
     try:
-        txt = pytesseract.image_to_string(img, lang=use_lang, config=cfg)
-    except Exception:
-        txt = pytesseract.image_to_string(img, lang="eng", config=cfg)
-    return _clean_text(txt)
-
-
-def _clean_text(s: str) -> str:
-    s = str(s or "").replace("\x0c", " ")
-    s = re.sub(r"[\r\n\t]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def _parse_number(text: str, field: str) -> float | None:
-    # NOTE: this used to try float(token) first and only fall back to the
-    # "divide by 100" dot-matrix repair when that raised an exception. A
-    # plain digit string like "1000" parses as a float with no exception,
-    # so that fallback was essentially dead code — it's exactly why rows
-    # like qty "1000" were coming out as 1000 instead of the true 10.00.
-    # All qty/price/amount parsing now goes through the single shared,
-    # deterministic parser in ocr_numbers.py.
-    from .ocr_numbers import parse_scanned_number
-    return parse_scanned_number(text, field)
-
-
-def _horizontal_text_centers(pil_img: Image.Image, boxes: dict[str, tuple[int, int, int, int]]) -> list[float]:
-    # Use description/code area for row detection. Numeric columns are too sparse.
-    src_fields = [f for f in ("desc", "code", "qty", "amount") if f in boxes]
-    if not src_fields:
-        return []
-    x1 = min(boxes[f][0] for f in src_fields)
-    y1 = min(boxes[f][1] for f in src_fields)
-    x2 = max(boxes[f][2] for f in src_fields)
-    y2 = max(boxes[f][3] for f in src_fields)
-    crop = pil_img.crop((x1, y1, x2, y2))
-    rgb = np.array(crop.convert("RGB"))
-    rgb = _remove_colored_lines(rgb)
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                               cv2.THRESH_BINARY_INV, 35, 12)
-    # remove long vertical/horizontal table lines from projection
-    h, w = th.shape
-    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, h // 5)))
-    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (max(20, w // 3), 1))
-    lines = cv2.morphologyEx(th, cv2.MORPH_OPEN, vk) | cv2.morphologyEx(th, cv2.MORPH_OPEN, hk)
-    text = cv2.subtract(th, lines)
-    proj = text.sum(axis=1) / 255.0
-    threshold = max(3.0, w * 0.008)
-    idx = np.where(proj > threshold)[0]
-    if idx.size == 0:
-        return []
-    groups = []
-    cur = [int(idx[0])]
-    for yy in idx[1:]:
-        yy = int(yy)
-        if yy - cur[-1] <= 5:
-            cur.append(yy)
-        else:
-            groups.append(cur)
-            cur = [yy]
-    groups.append(cur)
-    centers = []
-    for g in groups:
-        height = g[-1] - g[0] + 1
-        if 3 <= height <= max(60, h * 0.20):
-            centers.append(y1 + (g[0] + g[-1]) / 2.0)
-    # Merge very close centers
-    centers = sorted(centers)
-    merged = []
-    for c in centers:
-        if not merged or c - merged[-1] > max(10, (y2 - y1) * 0.025):
-            merged.append(c)
-        else:
-            merged[-1] = (merged[-1] + c) / 2.0
-    return merged
-
-
-def _item_centers_from_ocr(pil_img: Image.Image, boxes: dict[str, tuple[int, int, int, int]], lang: str) -> list[float]:
-    if "item" not in boxes:
-        return []
-    x1, y1, x2, y2 = boxes["item"]
-    crop = pil_img.crop((x1, y1, x2, y2))
-    img = _prep_for_ocr(crop, numeric=True, scale=4)
-    try:
-        data = pytesseract.image_to_data(img, lang="eng", config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789", output_type=pytesseract.Output.DICT)
-    except Exception:
-        return []
-    centers = []
-    scale_y = (y2 - y1) / max(1, img.height)
-    for txt, top, hh, conf in zip(data.get("text", []), data.get("top", []), data.get("height", []), data.get("conf", [])):
-        if not str(txt).strip().isdigit():
-            continue
-        try:
-            n = int(str(txt).strip())
-        except Exception:
-            continue
-        if 1 <= n <= 200:
-            centers.append(y1 + (float(top) + float(hh) / 2.0) * scale_y)
-    return sorted(centers)
-
-
-def _row_bounds_from_centers(centers: list[float], y_top: int, y_bottom: int) -> list[tuple[int, int, float]]:
-    centers = sorted([c for c in centers if y_top <= c <= y_bottom])
-    if not centers:
-        return []
-    mids = [(centers[i] + centers[i + 1]) / 2.0 for i in range(len(centers) - 1)]
-    bounds = []
-    for i, c in enumerate(centers):
-        top = y_top if i == 0 else mids[i - 1]
-        bot = y_bottom if i == len(centers) - 1 else mids[i]
-        pad = max(2, int((bot - top) * 0.12))
-        bounds.append((max(y_top, int(top) - pad), min(y_bottom, int(bot) + pad), c))
-    return bounds
-
-
-def _repair_numbers(qty: float | None, price: float | None, amount: float | None) -> tuple[float, float, float]:
-    q = float(qty or 0)
-    p = float(price or 0)
-    a = float(amount or 0)
-    # if amount and qty are reliable, price should come from amount / qty
-    if q > 0 and a > 0:
-        calc_p = round(a / q, 4)
-        if p <= 0 or abs(q * p - a) > max(0.03, abs(a) * 0.03):
-            p = calc_p
-    if q > 0 and p > 0:
-        calc_a = round(q * p, 2)
-        if a <= 0 or abs(calc_a - a) > max(0.03, abs(calc_a) * 0.03):
-            a = calc_a
-    return q, p, a
-
-
-def _read_footer_totals(pil_img: Image.Image, lang: str) -> tuple[float | None, float | None, float | None]:
-    W, H = pil_img.size
-    # bottom-right region where CMT prints TOTAL/VAT/GRAND TOTAL
-    region = pil_img.crop((int(W * 0.55), int(H * 0.62), int(W * 0.98), int(H * 0.93)))
-    img = _prep_for_ocr(region, numeric=False, scale=3)
-    try:
-        txt = pytesseract.image_to_string(img, lang="eng", config="--oem 3 --psm 6")
+        txt = pytesseract.image_to_string(proc, lang=use_lang, config=config)
     except Exception:
         txt = ""
-    nums = []
-    for raw in re.findall(r"[0-9][0-9,]*(?:\.[0-9]{1,2})?", txt):
-        v = _parse_number(raw, "amount")
-        if v and v > 0:
-            nums.append(v)
-    # Prefer the final 3 money values in footer. Filter out tiny date/form numbers.
-    nums = [n for n in nums if n >= 1]
-    if len(nums) >= 3:
-        return nums[-3], nums[-2], nums[-1]
+    txt = clean_ocr_text(normalize_digits(txt))
+    return txt, -1.0
+
+
+def _row_bands_from_words(words: list[OCRWord], boxes: dict[str, tuple[int, int, int, int]]) -> list[tuple[int, int]]:
+    if not boxes:
+        return []
+    x1 = min(b[0] for b in boxes.values())
+    y1 = min(b[1] for b in boxes.values())
+    x2 = max(b[2] for b in boxes.values())
+    y2 = max(b[3] for b in boxes.values())
+    table_words = [w for w in words if (x1 - 8) <= w.cx <= (x2 + 8) and (y1 - 8) <= w.cy <= (y2 + 8)]
+    if not table_words:
+        return []
+    table_words.sort(key=lambda w: w.cy)
+    heights = [w.height for w in table_words if w.height > 0]
+    tol = max(12.0, (float(np.median(heights)) if heights else 14.0) * 0.90)
+    clusters: list[list[OCRWord]] = []
+    for w in table_words:
+        if not clusters or abs(w.cy - float(np.mean([x.cy for x in clusters[-1]]))) > tol:
+            clusters.append([w])
+        else:
+            clusters[-1].append(w)
+    bands: list[tuple[int, int]] = []
+    for cl in clusters:
+        top = int(min(w.top for w in cl)) - 3
+        bot = int(max(w.bottom for w in cl)) + 3
+        if bot - top >= 8:
+            bands.append((max(y1, top), min(y2, bot)))
+    # remove too-close duplicate bands
+    out: list[tuple[int, int]] = []
+    for band in bands:
+        if not out or abs(((band[0]+band[1])/2) - ((out[-1][0]+out[-1][1])/2)) > 8:
+            out.append(band)
+        else:
+            out[-1] = (min(out[-1][0], band[0]), max(out[-1][1], band[1]))
+    return out
+
+
+def _row_bands_from_grid(image: Image.Image, boxes: dict[str, tuple[int, int, int, int]], filter_mode: str, remove_lines: bool) -> list[tuple[int, int]]:
+    if not boxes:
+        return []
+    x1 = min(b[0] for b in boxes.values())
+    y1 = min(b[1] for b in boxes.values())
+    x2 = max(b[2] for b in boxes.values())
+    y2 = max(b[3] for b in boxes.values())
+    body = _crop(image, (x1, y1, x2, y2), pad=0)
+    arr = np.array(body.convert("RGB"))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, (x2 - x1) // 8), 1))
+    hor = cv2.morphologyEx(inv, cv2.MORPH_OPEN, hk)
+    rowsum = hor.sum(axis=1) / 255.0
+    ys = [i for i, v in enumerate(rowsum) if v > (x2 - x1) * 0.25]
+    groups: list[list[int]] = []
+    for y in ys:
+        if not groups or y - groups[-1][-1] > 4:
+            groups.append([y])
+        else:
+            groups[-1].append(y)
+    lines = [int(np.mean(g)) for g in groups]
+    bands: list[tuple[int, int]] = []
+    if len(lines) >= 2:
+        for a, b in zip(lines, lines[1:]):
+            if b - a >= 12:
+                bands.append((y1 + a + 2, y1 + b - 2))
+    return bands
+
+
+def repair_line_numbers(line: POLine) -> POLine:
+    q = float(line.qty or 0)
+    p = float(line.price or 0)
+    a = float(line.amount or 0)
+    if q > 0 and a > 0:
+        derived_price = a / q
+        expected = q * p if p > 0 else 0
+        if p <= 0 or abs(expected - a) > max(1.0, abs(a) * 0.03):
+            p = derived_price
+    elif q > 0 and p > 0 and a <= 0:
+        a = q * p
+    elif a > 0 and p > 0 and q <= 0:
+        q = a / p
+    return replace(line, qty=round(q, 4), price=round(p, 4), amount=round(a, 2))
+
+
+def _line_from_row(image: Image.Image, words: list[OCRWord], boxes: dict[str, tuple[int, int, int, int]], row_band: tuple[int, int], lang: str, number_mode: str, filter_mode: str, remove_lines: bool) -> POLine | None:
+    raw: dict[str, str] = {}
+    conf: dict[str, float] = {}
+    for key, box in boxes.items():
+        cell_words = _words_in_cell(words, box, row_band)
+        txt, cf = _cell_text(cell_words, key)
+        # If Paddle missed a tiny numeric/code cell, fallback only for that crop.
+        if not txt and key in {"item", "code", "qty", "price", "amount"}:
+            l, _t, r, _b = box
+            txt, cf = _fallback_tesseract_cell(_crop(image, (l, row_band[0], r, row_band[1]), pad=3), key, lang, filter_mode, remove_lines)
+        raw[key] = txt
+        conf[key] = cf
+
+    item = clean_ocr_text(raw.get("item", ""))
+    code = clean_product_code(raw.get("code", ""))
+    desc = clean_part_description(raw.get("desc", ""))
+    qty = parse_scanned_number(raw.get("qty", ""), "qty", number_mode) or 0.0
+    price = parse_scanned_number(raw.get("price", ""), "price", number_mode) or 0.0
+    amount = parse_scanned_number(raw.get("amount", ""), "amount", number_mode) or 0.0
+
+    joined = " ".join([item, code, desc]).upper()
+    if re.search(r"TOTAL|GRAND|VAT|ภาษี|รวม", joined):
+        return None
+    if not code and not desc:
+        return None
+    if qty <= 0 and price <= 0 and amount <= 0:
+        return None
+
+    line = POLine(item_no=item, product_code_raw=code, description_raw=desc, qty=qty, price=price, amount=amount)
+    line = repair_line_numbers(line)
+    try:
+        line.match_score = max([v for v in conf.values() if v >= 0] or [0])
+    except Exception:
+        pass
+    return line
+
+
+def _extract_footer_totals(image: Image.Image, table_bottom: int, lang: str, number_mode: str, filter_mode: str, remove_lines: bool) -> tuple[float | None, float | None, float | None]:
+    w, h = image.size
+    top = min(max(table_bottom, int(h * 0.55)), int(h * 0.84))
+    crop = image.crop((int(w * 0.42), top, w, h))
+    proc = _prepare_image(crop, filter_mode, remove_lines)
+    try:
+        words = extract_words(proc, lang="en", min_confidence=0.05)
+        txt = words_to_text(words)
+    except Exception:
+        try:
+            txt = pytesseract.image_to_string(enhance_for_ocr(crop, mode=filter_mode, remove_color_lines=remove_lines), lang=lang or "tha+eng", config="--oem 3 --psm 6")
+        except Exception:
+            txt = ""
+    txt = normalize_digits(txt)
+    vals: list[float] = []
+    for token in re.findall(r"[0-9][0-9,\.]*", txt):
+        v = parse_scanned_number(token, "amount", number_mode)
+        if v is not None and 0 < v < 1_000_000_000:
+            vals.append(round(v, 2))
+    for i in range(0, max(0, len(vals) - 2)):
+        t, vat, g = vals[i], vals[i + 1], vals[i + 2]
+        if abs(vat - t * 0.07) <= max(2.0, t * 0.025) and abs(g - (t + vat)) <= max(2.0, g * 0.025):
+            return t, vat, g
+    if len(vals) >= 3:
+        return vals[-3], vals[-2], vals[-1]
     return None, None, None
 
 
-def build_po_document_template_v2(pil_img: Image.Image, lang: str, template: dict | None = None) -> PODocument:
+def build_po_document_template_v2(image: Image.Image, lang: str, template: dict | None, base_doc: PODocument | None = None) -> PODocument:
     doc = PODocument()
     profile = template or {}
-    W, H = pil_img.size
-    boxes = _normalize_boxes(profile, W, H)
-    required = {"code", "desc", "qty", "price", "amount"}
-    if not required.intersection(boxes.keys()):
-        doc.warnings.append("Template OCR v2: ยังไม่มีกรอบสอนตำแหน่งที่ใช้ได้")
+    w, h = image.size
+    boxes = _profile_boxes(profile, w, h)
+    if not boxes:
+        doc.warnings.append("ยังไม่มีกรอบสอนตำแหน่ง OCR ของลูกค้านี้")
         return doc
 
-    y_top = min(b[1] for b in boxes.values())
-    y_bottom = max(b[3] for b in boxes.values())
-    # row centers from item column first, then projection fallback
-    centers = _item_centers_from_ocr(pil_img, boxes, lang)
-    if len(centers) < 2:
-        centers = _horizontal_text_centers(pil_img, boxes)
-    bounds = _row_bounds_from_centers(centers, y_top, y_bottom)
-    if not bounds:
-        doc.warnings.append("Template OCR v2: หาแนวแถวสินค้าไม่เจอ")
-        return doc
+    number_mode = str(profile.get("number_mode") or "auto")
+    filter_mode = str(profile.get("ocr_filter_mode") or profile.get("filter_mode") or "auto")
+    remove_lines = bool(profile.get("remove_color_lines", True))
+    proc_img = _prepare_image(image, filter_mode, remove_lines)
+
+    try:
+        words = extract_words(proc_img, lang="en", min_confidence=0.05)
+    except Exception as exc:
+        doc.warnings.append(f"PaddleOCR ใช้งานไม่ได้ จึง fallback บางช่องด้วย Tesseract: {exc}")
+        words = []
+
+    bands = _row_bands_from_words(words, boxes) if words else []
+    if not bands:
+        bands = _row_bands_from_grid(proc_img, boxes, filter_mode, remove_lines)
 
     lines: list[POLine] = []
-    for idx, (rtop, rbot, center) in enumerate(bounds, start=1):
-        def crop_field(field: str):
-            if field not in boxes:
-                return None
-            x1, y1, x2, y2 = boxes[field]
-            return pil_img.crop((x1, max(y1, rtop), x2, min(y2, rbot)))
+    for band in bands:
+        line = _line_from_row(proc_img, words, boxes, band, lang, number_mode, filter_mode, remove_lines)
+        if line:
+            lines.append(line)
 
-        item_txt = _ocr_text(crop_field("item"), lang, "item") if crop_field("item") else str(idx)
-        code_txt = _ocr_text(crop_field("code"), lang, "code") if crop_field("code") else ""
-        desc_txt = _ocr_text(crop_field("desc"), lang, "desc") if crop_field("desc") else ""
-        from .ocr_text import clean_ocr_text
-        code_txt = clean_ocr_text(code_txt)
-        desc_txt = clean_ocr_text(desc_txt)
-        qty_txt = _ocr_text(crop_field("qty"), lang, "qty") if crop_field("qty") else ""
-        price_txt = _ocr_text(crop_field("price"), lang, "price") if crop_field("price") else ""
-        amount_txt = _ocr_text(crop_field("amount"), lang, "amount") if crop_field("amount") else ""
-        qty = _parse_number(qty_txt, "qty")
-        price = _parse_number(price_txt, "price")
-        amount = _parse_number(amount_txt, "amount")
-        q, p, a = _repair_numbers(qty, price, amount)
-        # Skip empty/noise rows. Keep rows with a code/description or numeric amount.
-        if not code_txt and not desc_txt and q <= 0 and a <= 0:
+    clean_lines: list[POLine] = []
+    seen = set()
+    for line in lines:
+        key = (line.product_code_raw, line.description_raw, round(line.qty, 4), round(line.amount, 2))
+        if key in seen:
             continue
-        # Filter probable footer row if it slipped into the bottom of body.
-        if re.search(r"TOTAL|VAT|GRAND|รวม", (code_txt + " " + desc_txt).upper()) and not code_txt.strip():
-            continue
-        item_no = re.sub(r"\D+", "", item_txt) or str(idx)
-        lines.append(POLine(
-            item_no=item_no,
-            product_code_raw=code_txt.strip(),
-            description_raw=desc_txt.strip(),
-            qty=q,
-            price=p,
-            amount=a,
-        ))
+        seen.add(key)
+        clean_lines.append(line)
+    for idx, line in enumerate(clean_lines, 1):
+        if not str(line.item_no).strip() or not re.search(r"\d", str(line.item_no)):
+            line.item_no = str(idx)
 
-    doc.lines = lines
-    total, vat, grand = _read_footer_totals(pil_img, lang)
-    sum_amount = round(sum(l.amount if l.amount else l.qty * l.price for l in doc.lines), 2)
-    if total and grand:
-        doc.total = round(total, 2)
-        doc.vat = round(vat if vat is not None else max(0, grand - total), 2)
-        doc.grand_total = round(grand, 2)
-        if sum_amount and abs(sum_amount - doc.total) > max(1.0, doc.total * 0.03):
-            doc.warnings.append(f"ยอดรายการ {sum_amount:,.2f} ไม่ตรงยอดท้ายบิล {doc.total:,.2f} โปรดตรวจ")
+    doc.lines = clean_lines
+    bottom = max((b[3] for b in boxes.values()), default=int(h * 0.75))
+    printed_total, printed_vat, printed_grand = _extract_footer_totals(proc_img, bottom, lang, number_mode, filter_mode, remove_lines)
+    line_total = round(sum((l.amount if l.amount > 0 else l.qty * l.price) for l in doc.lines), 2)
+    if printed_total and printed_grand:
+        doc.total = round(printed_total, 2)
+        doc.vat = round(printed_vat if printed_vat is not None else printed_total * 0.07, 2)
+        doc.grand_total = round(printed_grand, 2)
+        if line_total and abs(line_total - doc.total) > max(1.0, doc.total * 0.02):
+            doc.warnings.append(f"ยอดรายการ ({line_total:,.2f}) ยังไม่ตรงยอดท้ายบิล ({doc.total:,.2f})")
     else:
-        doc.total = sum_amount
+        doc.total = line_total
         doc.vat = round(doc.total * 0.07, 2)
         doc.grand_total = round(doc.total + doc.vat, 2)
-        doc.warnings.append("อ่านยอดท้ายบิลไม่ได้ จึงคำนวณจากรายการสินค้า")
-    doc._used_template_v2 = True  # type: ignore[attr-defined]
+        doc.warnings.append("อ่านยอดท้ายบิลไม่ชัด ระบบคำนวณยอดจากรายการแทน")
+
+    if base_doc:
+        doc.po_no = getattr(base_doc, "po_no", "") or doc.po_no
+        doc.po_date = getattr(base_doc, "po_date", "") or doc.po_date
+        doc.po_date_raw = getattr(base_doc, "po_date_raw", "") or doc.po_date_raw
+    if not doc.lines:
+        doc.warnings.append("PaddleOCR ไม่พบรายการสินค้า กรุณาตรวจกรอบสอนตำแหน่ง/Filter")
+    doc._used_template = True  # type: ignore[attr-defined]
+    doc._ocr_engine = "paddleocr"  # type: ignore[attr-defined]
     return doc
-
-
-# === OCR FILTER PROFILE PATCH ===
-try:
-    from .ocr_image_filters import apply_ocr_filter, remove_colored_artifacts
-    _ocr_filter_active_profile = "auto"
-    _ocr_filter_remove_lines = True
-
-    def _set_ocr_filter_profile(template=None):
-        global _ocr_filter_active_profile, _ocr_filter_remove_lines
-        if isinstance(template, dict):
-            _ocr_filter_active_profile = str(template.get("ocr_filter_profile") or "auto")
-            _ocr_filter_remove_lines = bool(template.get("ocr_remove_colored_lines", True))
-        else:
-            _ocr_filter_active_profile = "auto"
-            _ocr_filter_remove_lines = True
-
-    def _remove_colored_lines(rgb):  # type: ignore[no-redef]
-        return remove_colored_artifacts(rgb, aggressive=_ocr_filter_remove_lines)
-
-    def _prep_for_ocr(pil, numeric=False, scale=3):  # type: ignore[no-redef]
-        import cv2
-        import numpy as np
-        from PIL import Image
-        base = apply_ocr_filter(
-            pil,
-            profile=_ocr_filter_active_profile,
-            numeric=bool(numeric),
-            remove_lines=_ocr_filter_remove_lines,
-            threshold=False,
-        )
-        gray = cv2.cvtColor(np.array(base.convert("RGB")), cv2.COLOR_RGB2GRAY)
-        if scale and scale != 1:
-            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        if numeric:
-            gray = cv2.GaussianBlur(gray, (3, 3), 0)
-            out = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 12)
-        else:
-            out = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 35, 11)
-        return Image.fromarray(out)
-
-    if "_ocr_filter_original_build_po_document_template_v2" not in globals():
-        _ocr_filter_original_build_po_document_template_v2 = build_po_document_template_v2
-
-        def build_po_document_template_v2(pil_img, lang, template=None):  # type: ignore[no-redef]
-            _set_ocr_filter_profile(template)
-            return _ocr_filter_original_build_po_document_template_v2(pil_img, lang, template)
-except Exception:
-    pass
-# === END OCR FILTER PROFILE PATCH ===
-

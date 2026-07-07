@@ -1,8 +1,11 @@
-"""Manual layout teaching with zoom, status, saved snapshot, full boxes and OCR filters."""
+"""Manual layout teaching with zoom, status, crop preview, full boxes and OCR filters.
+
+Hotfix: do not save teaching snapshot images to disk. The user can preview cropped
+regions in the dialog instead.
+"""
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 import re
 
 from PySide6.QtCore import Qt, QRectF, QSize
@@ -21,14 +24,18 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QButtonGroup,
     QFrame,
+    QScrollArea,
+    QWidget,
 )
 
-from .. import ocr, template, config
+from .. import ocr, template
 from ..context import AppContext
+
 try:
     from ..ocr_image_filters import PROFILE_LABELS, make_preview
 except Exception:
     PROFILE_LABELS = {"auto": "อัตโนมัติ (แนะนำ)", "raw": "ไม่ปรับภาพ"}
+
     def make_preview(pil_img, profile="auto", remove_lines=True):
         return pil_img.convert("RGB")
 
@@ -46,15 +53,17 @@ COLORS = {k: c for k, _, c in FIELDS}
 REQUIRED_FIELDS = {"desc", "qty", "price", "amount"}
 
 
-def _safe_name(name: str) -> str:
-    return re.sub(r"[^\w\-]+", "_", str(name).strip()) or "customer"
-
-
 def pil_to_pixmap(pil_img) -> QPixmap:
     im = pil_img.convert("RGB")
     data = im.tobytes("raw", "RGB")
     qimg = QImage(data, im.width, im.height, im.width * 3, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg.copy())
+
+
+def _scale_pixmap_for_preview(pix: QPixmap, max_width: int = 900) -> QPixmap:
+    if pix.width() <= max_width:
+        return pix
+    return pix.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
 
 
 class BoxCanvas(QGraphicsView):
@@ -66,20 +75,21 @@ class BoxCanvas(QGraphicsView):
         self.pix_item = self._scene.addPixmap(pixmap)
         self.pw, self.ph = pixmap.width(), pixmap.height()
         self._scene.setSceneRect(0, 0, self.pw, self.ph)
-
         self.active_field: str | None = None
         self.rects: dict[str, tuple] = {}
         self._start = None
         self._temp = None
         self._zoom = 1.0
         self.on_changed = None
-
+        self.on_field_changed = None
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setRenderHint(QPainter.Antialiasing, True)
         self.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
     def set_field(self, field: str):
         self.active_field = field
+        if callable(self.on_field_changed):
+            self.on_field_changed(field)
 
     def set_pixmap(self, pixmap: QPixmap):
         old_rects = {k: v[2] for k, v in self.rects.items()}
@@ -148,13 +158,11 @@ class BoxCanvas(QGraphicsView):
             old_r, old_l, _ = self.rects[field]
             self._scene.removeItem(old_r)
             self._scene.removeItem(old_l)
-
         item = self._scene.addRect(rect, self._pen(field, 3), QBrush(QColor(COLORS[field] + "33")))
         label = self._scene.addSimpleText(FIELD_LABELS[field])
         label.setBrush(QBrush(QColor(COLORS[field])))
         label.setPos(rect.left(), max(0, rect.top() - 24))
         self.rects[field] = (item, label, rect)
-
         if callable(self.on_changed):
             self.on_changed()
 
@@ -207,14 +215,55 @@ class BoxCanvas(QGraphicsView):
         self.resetTransform()
         self._zoom = 1.0
 
-    def save_snapshot(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        img = QImage(QSize(self.pw, self.ph), QImage.Format_ARGB32)
-        img.fill(Qt.GlobalColor.white)
-        painter = QPainter(img)
-        self._scene.render(painter, QRectF(0, 0, self.pw, self.ph), QRectF(0, 0, self.pw, self.ph))
-        painter.end()
-        img.save(str(path), "PNG")
+
+class CropPreviewDialog(QDialog):
+    """Preview crop regions in memory only; does not save images to disk."""
+
+    def __init__(self, parent, pil_img, rects: dict[str, tuple]):
+        super().__init__(parent)
+        self.setWindowTitle("ดูภาพที่ครอบไว้")
+        self.resize(980, 780)
+
+        root = QVBoxLayout(self)
+        note = QLabel("ภาพตัวอย่างนี้ใช้ดูเฉพาะในหน้าจอเท่านั้น ระบบจะไม่บันทึกไฟล์รูปลงเครื่อง")
+        note.setWordWrap(True)
+        note.setStyleSheet("font-weight:bold;color:#ffcc66;")
+        root.addWidget(note)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        lay = QVBoxLayout(host)
+
+        for key, label, _color in FIELDS:
+            if key not in rects:
+                continue
+            _, _, rect = rects[key]
+            left = max(0, int(rect.left()))
+            top = max(0, int(rect.top()))
+            right = min(pil_img.width, int(rect.right()))
+            bottom = min(pil_img.height, int(rect.bottom()))
+            if right <= left or bottom <= top:
+                continue
+            crop = pil_img.crop((left, top, right, bottom)).convert("RGB")
+            title = QLabel(f"{label}  |  x={left}-{right}, y={top}-{bottom}, size={right-left}x{bottom-top}")
+            title.setStyleSheet("font-weight:bold;margin-top:10px;")
+            img_label = QLabel()
+            img_label.setPixmap(_scale_pixmap_for_preview(pil_to_pixmap(crop)))
+            img_label.setStyleSheet("background:#ffffff;border:1px solid #555;padding:6px;")
+            lay.addWidget(title)
+            lay.addWidget(img_label)
+
+        lay.addStretch()
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+
+        btn = QPushButton("ปิด")
+        btn.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(btn)
+        root.addLayout(row)
 
 
 class LayoutTeacherDialog(QDialog):
@@ -229,22 +278,21 @@ class LayoutTeacherDialog(QDialog):
         images = ocr.render_pdf(pdf_path, min(260, int(ctx.cfg.get("dpi", 300))), ctx.cfg.get("poppler_path", ""))
         if not images:
             raise RuntimeError("ไม่สามารถแปลง PDF เป็นภาพสำหรับสอนตำแหน่งได้")
-        self.pil_original = images[0].convert("RGB")
 
+        self.pil_original = images[0].convert("RGB")
         self.filter_profile = "auto"
         self.remove_lines = True
         self.show_filtered_preview = False
         self.current_preview = self.pil_original
-
         self.canvas = BoxCanvas(pil_to_pixmap(self.pil_original))
         self.canvas.on_changed = self.update_status
+        self.canvas.on_field_changed = self.update_active_label
 
         root = QVBoxLayout(self)
-
         tip = QLabel(
             "วิธีใช้: เลือกช่องที่จะสอน แล้วลากกรอบครอบเฉพาะพื้นที่รายการสินค้าในคอลัมน์นั้น "
             "อย่าลากลงไปถึง TOTAL / VAT / GRAND TOTAL เพราะระบบจะอ่านยอดรวมเป็นสินค้า | "
-            "ถ้าบิลจาง/สีเพี้ยน ให้เลือกตัวกรองภาพก่อนบันทึกโปรไฟล์"
+            "กด 'ดูภาพที่ครอบ' เพื่อตรวจ crop ได้ โดยระบบจะไม่บันทึกรูปลงเครื่อง"
         )
         tip.setWordWrap(True)
         root.addWidget(tip)
@@ -252,12 +300,14 @@ class LayoutTeacherDialog(QDialog):
         tool = QHBoxLayout()
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
+        self.field_buttons: dict[str, QPushButton] = {}
         for key, label, color in FIELDS:
             b = QPushButton(label)
             b.setCheckable(True)
             b.setStyleSheet(f"QPushButton:checked{{background:{color};color:white;}}")
             b.clicked.connect(lambda _=False, k=key: self.canvas.set_field(k))
             self.group.addButton(b)
+            self.field_buttons[key] = b
             tool.addWidget(b)
 
         tool.addSpacing(16)
@@ -303,6 +353,10 @@ class LayoutTeacherDialog(QDialog):
         filter_bar.addStretch()
         root.addLayout(filter_bar)
 
+        self.active_label = QLabel("กำลังสอน: -")
+        self.active_label.setStyleSheet("font-weight:bold;color:#66d9ef;")
+        root.addWidget(self.active_label)
+
         status_box = QFrame()
         status_box.setFrameShape(QFrame.StyledPanel)
         status_layout = QGridLayout(status_box)
@@ -324,22 +378,27 @@ class LayoutTeacherDialog(QDialog):
         self.chk_name_below = QCheckBox("ชื่อสินค้าอยู่บรรทัดถัดไป")
         opt.addWidget(self.chk_name_below)
         opt.addStretch()
+        b_preview = QPushButton("🔍 ดูภาพที่ครอบ")
+        b_preview.clicked.connect(self.preview_crops)
         b_clear = QPushButton("ล้างกรอบทั้งหมด")
         b_clear.clicked.connect(self.canvas.clear_boxes)
         b_save = QPushButton("💾 บันทึกโปรไฟล์")
         b_save.clicked.connect(self.save)
         b_close = QPushButton("ปิด")
         b_close.clicked.connect(self.reject)
+        opt.addWidget(b_preview)
         opt.addWidget(b_clear)
         opt.addWidget(b_save)
         opt.addWidget(b_close)
         root.addLayout(opt)
 
-        buttons = self.group.buttons()
-        if len(buttons) >= 3:
-            buttons[2].setChecked(True)
-        self.canvas.set_field("desc")
+        if "desc" in self.field_buttons:
+            self.field_buttons["desc"].setChecked(True)
+            self.canvas.set_field("desc")
         self.update_status()
+
+    def update_active_label(self, field: str):
+        self.active_label.setText(f"กำลังสอน: {FIELD_LABELS.get(field, field)} — ลากกรอบบนเอกสารได้เลย")
 
     def update_preview_filter(self):
         self.filter_profile = self.cmb_filter.currentData() or "auto"
@@ -358,12 +417,12 @@ class LayoutTeacherDialog(QDialog):
 
     def update_status(self):
         have = set(self.canvas.rects.keys())
-        for key, label, color in FIELDS:
+        for key, label, _color in FIELDS:
             if key in have:
-                self.status_labels[key].setText(f"<span style='color:#21c55d'>✓ {label}: สอนแล้ว</span>")
+                self.status_labels[key].setText(f"✓ {label}: สอนแล้ว")
             else:
                 mark = "จำเป็น" if key in REQUIRED_FIELDS else "เสริม"
-                self.status_labels[key].setText(f"<span style='color:#ff6b6b'>✗ {label}: ยังไม่สอน ({mark})</span>")
+                self.status_labels[key].setText(f"✗ {label}: ยังไม่สอน ({mark})")
 
         missing_required = REQUIRED_FIELDS - have
         filter_label = self.cmb_filter.currentText() if hasattr(self, "cmb_filter") else "อัตโนมัติ"
@@ -372,8 +431,17 @@ class LayoutTeacherDialog(QDialog):
             self.status_summary.setText(f"สถานะ: ยังไม่พร้อม ต้องสอนเพิ่ม: {names} | Filter: {filter_label}")
             self.status_summary.setStyleSheet("font-weight:bold;color:#ff6b6b;")
         else:
-            self.status_summary.setText(f"สถานะ: พร้อมบันทึกโปรไฟล์ | Filter: {filter_label} | ล้าง Cache แล้ว OCR ใหม่")
+            self.status_summary.setText(
+                f"สถานะ: พร้อมบันทึกโปรไฟล์ | Filter: {filter_label} | กดดูภาพที่ครอบเพื่อตรวจได้ | ล้าง Cache แล้ว OCR ใหม่"
+            )
             self.status_summary.setStyleSheet("font-weight:bold;color:#21c55d;")
+
+    def preview_crops(self):
+        if not self.canvas.rects:
+            QMessageBox.information(self, "ยังไม่มีกรอบ", "กรุณาลากกรอบอย่างน้อย 1 ช่องก่อน")
+            return
+        dlg = CropPreviewDialog(self, self.current_preview, self.canvas.rects)
+        dlg.exec()
 
     def save(self):
         cols = self.canvas.fractions()
@@ -383,19 +451,6 @@ class LayoutTeacherDialog(QDialog):
             names = ", ".join(FIELD_LABELS[m] for m in missing)
             QMessageBox.warning(self, "ยังไม่ครบ", "กรุณาลากกรอบอย่างน้อย: " + names)
             return
-
-        snapshot_dir = config.TEMPLATE_DIR / "_teaching_snapshots"
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        snapshot_name = f"{_safe_name(self.customer)}_{stamp}.png"
-        snapshot_path = snapshot_dir / snapshot_name
-        self.canvas.save_snapshot(snapshot_path)
-
-        filter_snapshot = ""
-        if self.show_filtered_preview:
-            filter_path = snapshot_dir / f"{_safe_name(self.customer)}_{stamp}_filter_{self.filter_profile}.png"
-            filter_path.parent.mkdir(parents=True, exist_ok=True)
-            self.current_preview.save(filter_path)
-            filter_snapshot = str(filter_path)
 
         number_mode = self.cmb_num.currentData() if hasattr(self, "cmb_num") else "fixed2"
         profile = {
@@ -412,19 +467,19 @@ class LayoutTeacherDialog(QDialog):
             "ocr_show_filtered_preview": self.show_filtered_preview,
             "trained_at": datetime.now().isoformat(timespec="seconds"),
             "trained_from_pdf": str(self.pdf_path),
-            "trained_snapshot": str(snapshot_path),
-            "trained_filter_snapshot": filter_snapshot,
-            "ocr_hint": "ใช้กรอบสินค้า + filter ภาพก่อน OCR; ถ้าข้อมูลยังเพี้ยน ให้ลอง filter strong/line_clean แล้วล้าง Cache",
+            # Hotfix: do not save teaching images to disk. Keep keys empty for compatibility.
+            "trained_snapshot": "",
+            "trained_filter_snapshot": "",
+            "ocr_hint": "ระบบไม่บันทึกรูปสอนตำแหน่งลงเครื่องแล้ว ให้กดดูภาพที่ครอบในหน้าสอนตำแหน่งแทน",
         }
-
         template.save_profile(self.customer, profile)
-
         QMessageBox.information(
             self,
             "บันทึกแล้ว",
             f"บันทึกตำแหน่งคอลัมน์ของ '{self.customer}' เรียบร้อย\n\n"
             f"Filter: {self.cmb_filter.currentText()}\n"
-            f"เก็บภาพที่สอนตำแหน่งไว้ที่:\n{snapshot_path}\n\n"
+            "ระบบไม่ได้บันทึกไฟล์รูปที่ครอบลงเครื่อง\n"
+            "ถ้าต้องการตรวจภาพที่ครอบ ให้เปิดหน้าสอนตำแหน่งแล้วกด 'ดูภาพที่ครอบ'\n\n"
             "ให้กด 'ล้าง OCR Cache ทั้งหมด' หรือ 'ล้าง OCR Cache ของไฟล์ที่เลือก' แล้ว OCR ใหม่",
         )
         self.accept()

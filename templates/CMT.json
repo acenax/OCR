@@ -3,78 +3,78 @@
   "mode": "anchors",
   "number_mode": "fixed2",
   "name_below": false,
-  "data_top_frac": 0.37935,
-  "bottom_frac": 0.60685,
+  "data_top_frac": 0.38098,
+  "bottom_frac": 0.60487,
   "columns": {
     "item": [
-      0.07587,
-      0.10959
+      0.07518,
+      0.10753
     ],
     "code": [
-      0.13565,
-      0.20845
+      0.13798,
+      0.20745
     ],
     "desc": [
-      0.27895,
-      0.53875
+      0.27977,
+      0.51862
     ],
     "qty": [
-      0.68283,
-      0.75256
+      0.69182,
+      0.74796
     ],
     "price": [
-      0.79625,
-      0.85755
+      0.79649,
+      0.85073
     ],
     "amount": [
-      0.92058,
-      0.99202
+      0.91449,
+      0.99443
     ]
   },
   "boxes": {
     "item": [
-      0.07587,
-      0.38614,
-      0.10959,
-      0.60114
+      0.07518,
+      0.38533,
+      0.10753,
+      0.60119
     ],
     "code": [
-      0.13565,
-      0.38668,
-      0.20845,
-      0.59951
+      0.13798,
+      0.38533,
+      0.20745,
+      0.60187
     ],
     "desc": [
-      0.27895,
-      0.38397,
-      0.53875,
-      0.60114
+      0.27977,
+      0.386,
+      0.51862,
+      0.5985
     ],
     "qty": [
-      0.68283,
-      0.38668,
-      0.75256,
-      0.59681
+      0.69182,
+      0.38533,
+      0.74796,
+      0.59581
     ],
     "price": [
-      0.79625,
-      0.38235,
-      0.85755,
-      0.60385
+      0.79649,
+      0.38466,
+      0.85073,
+      0.59581
     ],
     "amount": [
-      0.92058,
-      0.38279,
-      0.99202,
-      0.60262
+      0.91449,
+      0.38398,
+      0.99443,
+      0.60052
     ]
   },
-  "ocr_filter_profile": "faded",
+  "ocr_filter_profile": "auto",
   "ocr_remove_colored_lines": true,
-  "ocr_show_filtered_preview": true,
-  "trained_at": "2026-07-06T14:52:56",
+  "ocr_show_filtered_preview": false,
+  "trained_at": "2026-07-06T17:15:45",
   "trained_from_pdf": "C:/Users/Admin/Desktop/testdata/PO CMT/PO69110614.pdf",
-  "trained_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_145256.png",
-  "trained_filter_snapshot": "C:\\Users\\Admin\\Desktop\\TMC_OCR\\templates\\_teaching_snapshots\\CMT_20260706_145256_filter_faded.png",
-  "ocr_hint": "ใช้กรอบสินค้า + filter ภาพก่อน OCR; ถ้าข้อมูลยังเพี้ยน ให้ลอง filter strong/line_clean แล้วล้าง Cache"
+  "trained_snapshot": "",
+  "trained_filter_snapshot": "",
+  "ocr_hint": "ระบบไม่บันทึกรูปสอนตำแหน่งลงเครื่องแล้ว ให้กดดูภาพที่ครอบในหน้าสอนตำแหน่งแทน"
 }
